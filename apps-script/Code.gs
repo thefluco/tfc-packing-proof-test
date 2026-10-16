@@ -9,17 +9,20 @@
  *                    and updates the box row(s) in the "Packing Proof" Sheet
  *   action "row"   - updates box row(s) only (readings, numbers to book, AWB, status, times)
  *   action "log"   - appends a station-log row (start of shift, the Monday 10 kg scale test)
+ *   action "read"  - reads the weight or the bay scales from a photo with Claude (vision) and returns the numbers;
+ *                    nothing is stored. The Anthropic API key lives only in Script Properties (ANTHROPIC_API_KEY)
  *
  * Drive rules: it only CREATES. It never moves, renames, overwrites or deletes anything. A name that already
  * exists is skipped (same upload) or refused with code "name_taken" (the phone then uses the next number).
  *
- * Scope: drive.file only - the script can see just the folders and files it created itself.
- * One-time setup: run setup() in the editor (creates the folder, the TEST folder, the Sheet and the station key),
- * then Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone. See README.md.
+ * Scopes: drive.file (the script sees just the folders and files it created itself) and external_request (the
+ * call to api.anthropic.com). One-time setup: run setup() in the editor (creates the folder, the TEST folder, the
+ * Sheet and the station key), add ANTHROPIC_API_KEY in Project Settings > Script properties, then
+ * Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone. See README.md.
  */
 
 var PP = {
-  VERSION: '1.0.0',
+  VERSION: '1.1.0',
   ROOT_NAME: 'Packing Proof',
   TEST_NAME: 'TEST',
   SHEET_NAME: 'Packing Proof',
@@ -33,8 +36,13 @@ var PP = {
   SHEET_MIME: 'application/vnd.google-apps.spreadsheet',
 };
 
-var NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes)-(\d{2})\.jpg$/;
-var KIND_COLS = { 'label': 'Label', 'breadth': 'Breadth', 'length-height': 'Length-height', 'scale': 'Scale', 'boxes': 'Boxes' };
+// Proof photos (label, scale, length-height, breadth, boxes) plus the reading photos taken before the label
+// (measure-*), which the numbers to book were read from. sync.py counts only the proof kinds as dispute images.
+var NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length-height|measure-breadth)-(\d{2})\.jpg$/;
+var KIND_COLS = {
+  'label': 'Label', 'breadth': 'Breadth', 'length-height': 'Length-height', 'scale': 'Scale', 'boxes': 'Boxes',
+  'measure-scale': 'Measure weight', 'measure-length-height': 'Measure length-height', 'measure-breadth': 'Measure breadth',
+};
 
 // ------------------------------------------------------------------ the Sheet's columns
 // [header, value from (row snapshot, request)] - undefined keeps what the cell already holds.
@@ -96,6 +104,12 @@ var BOX_COLS = [
   ['Phone', function (s, req) { return req.phone || ''; }],
   ['App', function (s, req) { return req.app || ''; }],
   ['Team notes', function () { return undefined; }],   // people type here; the script never writes it
+  // v1.1 (image-first): where each reading came from, the re-read of the proof photos, the reading photos.
+  ['Readings source', function (s) { return s.readings_source || ''; }],
+  ['Re-read check', function (s) { return s.reread || ''; }],
+  ['Measure weight photo', photoUrl_('measure-scale')],
+  ['Measure length-height photo', photoUrl_('measure-length-height')],
+  ['Measure breadth photo', photoUrl_('measure-breadth')],
 ];
 var FILE_COLS = ['Uploaded', 'Test', 'AWB', 'Box', 'Kind', 'No.', 'File', 'Link', 'Bytes', 'Final when uploaded', 'Captured', 'Station', 'Phone', 'Upload ID'];
 var LOG_COLS = ['Logged', 'Test', 'Station', 'Type', 'Reading', 'Result', 'Notes', 'Phone', 'App', 'Entry ID'];
@@ -119,6 +133,7 @@ function doPost(e) {
   }
   try {
     if (req.action === 'ping') return reply_(ping_());
+    if (req.action === 'read') return reply_(read_(req));
     if (req.action === 'photo') return reply_(locked_(function () { return photo_(req); }));
     if (req.action === 'row') return reply_(locked_(function () { return rows_(req); }));
     if (req.action === 'log') return reply_(locked_(function () { return log_(req); }));
@@ -355,6 +370,136 @@ function ping_() {
     test: { id: ids.test, url: folderUrl_(ids.test) },
     sheet: { id: ids.sheet, url: sheetUrl_(ids.sheet) },
   };
+}
+
+// ------------------------------------------------------------------ reading the numbers from a photo (Claude vision)
+// The phone sends the whole photo (<= 2576 px) plus close-ups of the printed scales when the mount is calibrated.
+// Model, effort and key come from Script Properties: ANTHROPIC_API_KEY (required), READ_MODEL, READ_EFFORT.
+var READ_SYSTEM = 'You read measurements from photos taken at a parcel measuring station. The numbers are used to book ' +
+  'shipments and to dispute courier weight charges, so being right matters more than giving an answer: never guess a ' +
+  'value you cannot see - mark it unreadable instead. Where a board or arm sits between two marks, give the larger ' +
+  'value: the parcel is billed by its outer size, so reading low understates it. Reply with the requested JSON only.';
+var READ_BAY = 'The measuring bay: a white base 180 x 75 cm with a back wall along the far long side and a left wall. ' +
+  'Printed scales: scale L runs along the front edge of the base, 0 at the left wall, a tick every cm and numbers every ' +
+  '5 cm. Scales B1 (left end) and B2 (right end) run from the back wall (0) towards the front. The parcel sits in the ' +
+  'back-left corner, one end against the left wall and one side against the back wall. ';
+var READ_HALF = ' Give centimetres, to the nearest half centimetre where the marks allow.';
+var CONF = { type: 'string', enum: ['high', 'medium', 'low'] };
+var READ_SPECS = {
+  'scale': {
+    ask: 'A parcel on a platform weighing scale. Read the weight on the scale\'s digital display exactly as shown, in kg, ' +
+      'keeping every decimal. Also say whether the parcel rests only on the platform with both ends clear of the floor, ' +
+      'and whether the display digits look steady and complete.',
+    schema: {
+      type: 'object', additionalProperties: false,
+      required: ['readable', 'weight_kg', 'confidence', 'on_platform_only', 'display_steady', 'notes'],
+      properties: {
+        readable: { type: 'boolean' }, weight_kg: { type: 'string', description: 'As displayed, e.g. "16.85". Empty if unreadable.' },
+        confidence: CONF, on_platform_only: { type: 'boolean' }, display_steady: { type: 'boolean' }, notes: { type: 'string' },
+      },
+    },
+  },
+  'length-height': {
+    ask: READ_BAY + 'LENGTH: an end panel (a board standing across the bay) touches the parcel\'s far end, on the right. ' +
+      'Read scale L at the face of the end panel that touches the parcel. HEIGHT: a height gauge (an upright post with a ' +
+      'printed scale facing the camera) has an arm resting on the parcel\'s highest point; read the gauge scale at the ' +
+      'underside of the arm.' + READ_HALF,
+    schema: {
+      type: 'object', additionalProperties: false,
+      required: ['length_readable', 'length_cm', 'length_confidence', 'height_readable', 'height_cm', 'height_confidence', 'notes'],
+      properties: {
+        length_readable: { type: 'boolean' }, length_cm: { type: 'string', description: 'e.g. "103.5". Empty if unreadable.' },
+        length_confidence: CONF, height_readable: { type: 'boolean' }, height_cm: { type: 'string', description: 'e.g. "27". Empty if unreadable.' },
+        height_confidence: CONF, notes: { type: 'string' },
+      },
+    },
+  },
+  'breadth': {
+    ask: READ_BAY + 'BREADTH: a long low fence board lies along the front of the parcel, parallel to the back wall, ' +
+      'touching its widest point. Read scale B1 and scale B2 where the fence\'s front face crosses them.' + READ_HALF,
+    schema: {
+      type: 'object', additionalProperties: false,
+      required: ['readable', 'b1_cm', 'b2_cm', 'confidence', 'notes'],
+      properties: {
+        readable: { type: 'boolean' }, b1_cm: { type: 'string', description: 'Empty if unreadable.' },
+        b2_cm: { type: 'string', description: 'Empty if unreadable.' }, confidence: CONF, notes: { type: 'string' },
+      },
+    },
+  },
+};
+
+// {url, headers, body} for POST /v1/messages (the caller adds x-api-key). Shared with the test site's harness.
+function buildReadRequest_(req, model, effort) {
+  var base = String(req.kind || '').replace(/^measure-/, '');
+  var spec = READ_SPECS[base];
+  if (!spec) throw new Error('unknown reading: ' + req.kind);
+  var content = [];
+  (req.images || []).slice(0, 6).forEach(function (im, i) {
+    content.push({ type: 'text', text: 'Image ' + (i + 1) + ': ' + String(im.label || 'the photo').slice(0, 120) });
+    content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: String(im.b64 || '') } });
+  });
+  content.push({ type: 'text', text: spec.ask });
+  return {
+    url: 'https://api.anthropic.com/v1/messages',
+    headers: { 'anthropic-version': '2023-06-01', 'anthropic-beta': 'server-side-fallback-2026-07-01' },
+    body: {
+      model: model || 'claude-opus-5-5', max_tokens: 16000, fallbacks: 'default', system: READ_SYSTEM,
+      output_config: { effort: effort || 'medium', format: { type: 'json_schema', schema: spec.schema } },
+      messages: [{ role: 'user', content: content }],
+    },
+  };
+}
+
+function cleanReading_(v) {
+  var t = String(v == null ? '' : v).replace(',', '.').replace(/[^0-9.]/g, '');
+  return /^\d{1,4}(\.\d{1,3})?$/.test(t) ? t : '';
+}
+
+// The API's reply -> {ok, kind, values:{weight|length,height|b1,b2}, confidence:{...}, flags, notes, model}
+function parseReadResponse_(kind, res) {
+  if (!res || res.type === 'error') return { ok: false, code: 'reader_error', error: String((res && res.error && res.error.message) || 'no reply').slice(0, 200) };
+  if (res.stop_reason === 'refusal') return { ok: false, code: 'reader_refused', error: 'the reader declined this photo' };
+  if (res.stop_reason === 'max_tokens') return { ok: false, code: 'reader_error', error: 'the reply was cut off' };
+  var text = (res.content || []).filter(function (b) { return b.type === 'text'; }).map(function (b) { return b.text; }).join('');
+  var o;
+  try { o = JSON.parse(text); } catch (e) { return { ok: false, code: 'reader_error', error: 'the reply was not JSON' }; }
+  var base = String(kind || '').replace(/^measure-/, ''), values = {}, confidence = {}, flags = {};
+  if (base === 'scale') {
+    if (o.readable && cleanReading_(o.weight_kg)) values.weight = cleanReading_(o.weight_kg);
+    confidence.weight = o.confidence;
+    flags = { on_platform_only: !!o.on_platform_only, display_steady: !!o.display_steady };
+  } else if (base === 'length-height') {
+    if (o.length_readable && cleanReading_(o.length_cm)) values.length = cleanReading_(o.length_cm);
+    if (o.height_readable && cleanReading_(o.height_cm)) values.height = cleanReading_(o.height_cm);
+    confidence.length = o.length_confidence; confidence.height = o.height_confidence;
+  } else if (base === 'breadth') {
+    if (o.readable && cleanReading_(o.b1_cm)) values.b1 = cleanReading_(o.b1_cm);
+    if (o.readable && cleanReading_(o.b2_cm)) values.b2 = cleanReading_(o.b2_cm);
+    confidence.breadth = o.confidence;
+  }
+  return { ok: true, kind: base, values: values, confidence: confidence, flags: flags, notes: String(o.notes || '').slice(0, 300), model: res.model || '' };
+}
+
+function read_(req) {
+  var p = props_(), key = p.getProperty('ANTHROPIC_API_KEY');
+  if (!key) return { ok: false, code: 'no_reader', error: 'no Anthropic API key in Script Properties (ANTHROPIC_API_KEY)' };
+  var imgs = req.images || [];
+  if (!imgs.length || imgs.length > 6) return { ok: false, code: 'bad_image', error: 'send 1 to 6 images' };
+  for (var i = 0; i < imgs.length; i++) {
+    var b = String(imgs[i].b64 || '');
+    if (b.length > 6900000 || b.slice(0, 4) !== '/9j/') return { ok: false, code: 'bad_image', error: 'image ' + (i + 1) + ' is not a JPEG under 5 MB' };
+  }
+  var r;
+  try { r = buildReadRequest_(req, p.getProperty('READ_MODEL'), p.getProperty('READ_EFFORT')); } catch (e) { return { ok: false, code: 'bad_kind', error: e.message }; }
+  var headers = { 'x-api-key': key };
+  Object.keys(r.headers).forEach(function (h) { headers[h] = r.headers[h]; });
+  var resp = UrlFetchApp.fetch(r.url, { method: 'post', contentType: 'application/json', headers: headers, payload: JSON.stringify(r.body), muteHttpExceptions: true });
+  var status = resp.getResponseCode(), body = resp.getContentText(), json = null;
+  try { json = JSON.parse(body); } catch (e) { json = null; }
+  if (status === 401 || status === 403) return { ok: false, code: 'reader_key', error: 'the Anthropic API key was refused' };
+  if (status === 429 || status >= 500) return { ok: false, code: 'reader_busy', error: 'the reader is busy (HTTP ' + status + '); try again' };
+  if (status !== 200) return { ok: false, code: 'reader_error', error: 'HTTP ' + status + ': ' + String((json && json.error && json.error.message) || body).slice(0, 200) };
+  return parseReadResponse_(req.kind, json);
 }
 
 // ------------------------------------------------------------------ one-time setup (run from the editor)
