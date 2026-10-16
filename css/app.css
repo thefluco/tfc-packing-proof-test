@@ -76,6 +76,13 @@ details summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
 .thumbs figure { margin: 0; }
 .thumbs img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; cursor: zoom-in; background: #ddd; }
 .thumbs figcaption { font-size: 11px; color: var(--muted); overflow-wrap: anywhere; margin-top: 2px; }
+table.readings { width: 100%; border-collapse: collapse; margin: 4px 0 8px; }
+table.readings th { text-align: left; font-size: 14px; color: var(--muted); width: 74px; padding: 8px 4px; }
+table.readings td { padding: 8px 4px; border-top: 1px solid var(--line); font-size: 16px; }
+table.readings td:last-child { width: 1%; white-space: nowrap; text-align: right; }
+button.mini { min-height: 36px; padding: 4px 12px; font-size: 14px; border-radius: 10px; }
+.thumbs .noimg { aspect-ratio: 16 / 9; border-radius: 8px; background: #e8eaee; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
+.thumbs figcaption button.mini { margin: 4px 4px 0 0; }
 .tablewrap { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 10px; }
 .tablewrap table { border-collapse: collapse; font-size: 13px; }
 .tablewrap th, .tablewrap td { border-bottom: 1px solid var(--line); padding: 6px 8px; white-space: nowrap; text-align: left; }
