@@ -1,6 +1,6 @@
 // Service worker: keeps the app working with no network (the upload queue lives in IndexedDB).
 // Bump VERSION with every release so phones pick up the new files.
-const VERSION = 'pp-test-20261016-2058';
+const VERSION = 'pp-test-20261016-2104';
 const VENDOR = 'pp-vendor';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
@@ -10,7 +10,9 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // 'reload' skips the browser's HTTP cache (Pages allows 10 min), so a release never caches an old file beside new ones
+  const fresh = SHELL.map((u) => new Request(u, { cache: 'reload' }));
+  e.waitUntil(caches.open(VERSION).then((c) => c.addAll(fresh)).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', (e) => {
