@@ -192,6 +192,14 @@ const ContentService = {
   createTextOutput(text) { return { text, setMimeType() { return this; }, getContent() { return text; } }; },
 };
 const LockService = { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) };
+// Tests set state.urlfetch = (url, opts) => ({status, body}) to answer the script's call to the Anthropic API.
+const UrlFetchApp = {
+  fetch(url, opts) {
+    if (!state.urlfetch) throw new Error('harness: no UrlFetchApp stub set');
+    const r = state.urlfetch(url, opts);
+    return { getResponseCode: () => r.status, getContentText: () => (typeof r.body === 'string' ? r.body : JSON.stringify(r.body)) };
+  },
+};
 const PropertiesService = { getScriptProperties: () => ({ getProperty: (k) => state.props.get(k) ?? null, setProperty: (k, v) => state.props.set(k, String(v)) }) };
 const CacheService = { getScriptCache: () => ({ get: (k) => state.cache.get(k) ?? null, put: (k, v) => state.cache.set(k, v), remove: (k) => state.cache.delete(k) }) };
 const harnessConsole = {
@@ -240,9 +248,10 @@ export async function load(opts = {}) {
   if (gas) return gas;
   const src = new URL('../apps-script/Code.gs', import.meta.url);
   const code = await (await fetch(src, { cache: 'no-store' })).text();
-  const factory = new Function('Drive', 'Sheets', 'Utilities', 'ContentService', 'LockService', 'PropertiesService', 'CacheService', 'console',
-    code + '\nreturn { doPost: doPost, doGet: doGet, setup: setup, newStationKey: newStationKey, PP: PP, BOX_COLS: BOX_COLS };');
-  gas = factory(Drive, Sheets, Utilities, ContentService, LockService, PropertiesService, CacheService, harnessConsole);
+  const factory = new Function('Drive', 'Sheets', 'Utilities', 'ContentService', 'LockService', 'PropertiesService', 'CacheService', 'UrlFetchApp', 'console',
+    code + '\nreturn { doPost: doPost, doGet: doGet, setup: setup, newStationKey: newStationKey, PP: PP, BOX_COLS: BOX_COLS,' +
+    ' buildReadRequest_: buildReadRequest_, parseReadResponse_: parseReadResponse_ };');
+  gas = factory(Drive, Sheets, Utilities, ContentService, LockService, PropertiesService, CacheService, UrlFetchApp, harnessConsole);
   persist = !!opts.persist;
   const restored = persist && await restoreState().catch(() => false);
   // The script's own folder exists only after setup(); Drive's "root" is implicit.
@@ -261,9 +270,46 @@ export async function load(opts = {}) {
   return gas;
 }
 
+// The test site's reader. The real backend calls the Anthropic API from Apps Script with a key in Script
+// Properties; here the same request is built and parsed by Code.gs, but sent from the browser with a key typed
+// on this device (Settings, test site only). Without a key, the demo camera's drawn values are returned.
+let readerKey = '';
+export function setReaderKey(k) { readerKey = String(k || '').trim(); }
+export function hasReaderKey() { return !!readerKey; }
+
+async function readAsync(g, payload) {
+  const auth = JSON.parse(g.doPost({ postData: { contents: JSON.stringify({ v: 1, key: payload.key, action: 'ping' }) } }).getContent());
+  if (!auth.ok) return auth;   // same station-key check as every other action
+  if (readerKey) {
+    const r = g.buildReadRequest_(payload, 'claude-opus-5-5', 'medium');
+    let res, json = null;
+    try {
+      res = await fetch(r.url, {
+        method: 'POST', body: JSON.stringify(r.body),
+        headers: { ...r.headers, 'content-type': 'application/json', 'x-api-key': readerKey, 'anthropic-dangerous-direct-browser-access': 'true' },
+      });
+      json = await res.json().catch(() => null);
+    } catch (e) { return { ok: false, code: 'network', error: String((e && e.message) || e) }; }
+    if (res.status === 401 || res.status === 403) return { ok: false, code: 'reader_key', error: 'the Anthropic API key was refused' };
+    if (res.status === 429 || res.status >= 500) return { ok: false, code: 'reader_busy', error: `the reader is busy (HTTP ${res.status}); try again` };
+    if (!res.ok) return { ok: false, code: 'reader_error', error: `HTTP ${res.status}: ${String((json && json.error && json.error.message) || '').slice(0, 200)}` };
+    return g.parseReadResponse_(payload.kind, json);
+  }
+  const t = payload.demo_truth;
+  if (t) {
+    await new Promise((r) => setTimeout(r, 700));
+    const base = String(payload.kind).replace(/^measure-/, '');
+    const values = base === 'scale' ? { weight: t.weight } : base === 'length-height' ? { length: t.length, height: t.height } : { b1: t.breadth, b2: t.breadth };
+    const confidence = base === 'scale' ? { weight: 'high' } : base === 'length-height' ? { length: 'high', height: 'high' } : { breadth: 'high' };
+    return { ok: true, kind: base, values, confidence, flags: {}, notes: 'demo camera: drawn values', model: 'demo' };
+  }
+  return { ok: false, code: 'no_reader', error: 'No AI key on this test site yet (Settings)' };
+}
+
 // Same shape as uploader.postJSON: the request goes through JSON exactly as it would over HTTP.
 export async function post(url, payload) {
   const g = await load();
+  if (payload && payload.action === 'read' && !state.syncReader) return readAsync(g, payload);
   await new Promise((r) => setTimeout(r, 5));
   const out = g.doPost({ postData: { contents: JSON.stringify(payload), type: 'text/plain' } });
   if (persist) await saveState();
