@@ -52,9 +52,33 @@ export function readingWarnings(r) {
   return w;
 }
 
+// ---------------------------------------------------------------- readings from the photo reader
+// The fence is read on B1 and B2; book the larger (errs on the bigger side, as the courier's machine would).
+export function breadthFrom(b1, b2) {
+  const t1 = toThousandths(b1), t2 = toThousandths(b2);
+  if (t1 === null) return t2 === null ? '' : b2;
+  if (t2 === null) return b1;
+  return t2 > t1 ? b2 : b1;
+}
+
+// Book number for one field, from a reading string.
+export function bookFor(field, s) { return field === 'weight' ? bookKg(s) : bookCm(s); }
+
+// "weight read (high) · length read (medium) · breadth typed (read 25) · height read (high)"
+export function sourcesLine(reads) {
+  return ['weight', 'length', 'breadth', 'height'].map((f) => {
+    const r = reads && reads[f];
+    if (!r) return `${f} -`;
+    if (r.source === 'typed') return `${f} typed${r.read_value ? ` (read ${r.read_value})` : ''}`;
+    return `${f} read (${r.confidence || '?'})`;
+  }).join(' · ');
+}
+
 // ---------------------------------------------------------------- file names
-// <AWB>[-b<box>]-ours-<label|scale|length-height|breadth|boxes>-<nn>.jpg  (box only for multi-box; never for "boxes")
-export const NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes)-(\d{2})\.jpg$/;
+// <AWB>[-b<box>]-ours-<label|scale|length-height|breadth|boxes>-<nn>.jpg  (box only for multi-box; never for "boxes").
+// Reading photos (taken before the label) are -ours-measure-<scale|length-height|breadth>-<nn>.jpg: kept as the basis
+// of the booked numbers, and on purpose NOT matched by sync.py's dispute-photo pattern.
+export const NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length-height|measure-breadth)-(\d{2})\.jpg$/;
 
 export function photoName({ awb, box, boxes, kind, nn }) {
   if (!(nn >= 1 && nn <= 99)) throw new Error('photo number out of range: ' + nn);

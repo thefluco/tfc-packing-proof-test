@@ -63,54 +63,82 @@ function label(ctx, x, y, w, h, code, k) {
   ctx.fillText('Demo Street, Test City 000000', x + 14 * k, y + h * 0.84);
 }
 
-function scaleStrip(ctx, x0, y0, x1, y1, cm, k) {
-  // printed scale: tick every cm, digits every 5 cm
-  ctx.strokeStyle = '#111'; ctx.fillStyle = '#111'; ctx.font = `bold ${Math.round(11 * k)}px sans-serif`;
-  for (let i = 0; i <= cm; i++) {
-    const t = i / cm, x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
-    const len = (i % 5 === 0 ? 10 : 5) * k;
-    ctx.lineWidth = Math.max(1, k);
+// The bay base, as the default outline sees it: u along the length (0 = left wall), v from the back wall (0).
+const BAY_Q = [[0.12, 0.22], [0.88, 0.22], [0.97, 0.85], [0.03, 0.85]];
+function bayPt(W, H, u, v) {
+  const l = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+  const p = l(l(BAY_Q[0], BAY_Q[1], u), l(BAY_Q[3], BAY_Q[2], u), v);
+  return [p[0] * W, p[1] * H];
+}
+const DEFAULT_TRUTH = { weight: '16.85', length: '103.5', breadth: '26', height: '27' };
+
+function drawBay(ctx, W, H, kind, t, code, withLabel, k) {
+  const P = (u, v) => bayPt(W, H, u, v), poly = (pts) => { ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(...p) : ctx.moveTo(...p))); ctx.closePath(); };
+  ctx.fillStyle = '#9a9a96'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
+  ctx.fillStyle = '#f2f2ee'; poly([P(0, 0), P(1, 0), P(1, 1), P(0, 1)]); ctx.fill();
+  noise(ctx, W, H, 3, 0.08);
+  ctx.strokeStyle = '#111'; ctx.fillStyle = '#111'; ctx.lineWidth = Math.max(1, k);
+  ctx.font = `bold ${Math.round(12 * k)}px sans-serif`;
+  for (let cm = 0; cm <= 180; cm++) {        // scale L along the front edge
+    const [x, y] = P(cm / 180, 1), len = (cm % 5 ? 6 : 12) * k;
     ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + len); ctx.stroke();
-    if (i % 10 === 0) ctx.fillText(String(i), x - 6 * k, y + 22 * k);
+    if (cm % 10 === 0) ctx.fillText(String(cm), x - 7 * k, y + 26 * k);
+  }
+  for (const [u, dir] of [[0, -1], [1, 1]]) {   // B1 (left end) and B2 (right end), 0 at the back wall
+    for (let cm = 0; cm <= 75; cm++) {
+      const [x, y] = P(u, cm / 75), len = (cm % 5 ? 6 : 12) * k * dir;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + len, y); ctx.stroke();
+      if (cm % 10 === 0) ctx.fillText(String(cm), x + (dir < 0 ? -34 : 16) * k, y + 4 * k);
+    }
+  }
+  const L = Number(t.length) / 180, B = Number(t.breadth) / 75;
+  ctx.fillStyle = '#c8a46e'; poly([P(0, 0), P(L, 0), P(L, B), P(0, B)]); ctx.fill();   // the box, back-left
+  if (withLabel) { const [cx, cy] = P(L / 2, B / 2); label(ctx, cx - W * 0.06, cy - H * 0.08, W * 0.12, H * 0.16, code, k * 0.28); }
+  ctx.strokeStyle = '#7a4b22'; ctx.lineWidth = 9 * k;
+  if (kind === 'breadth') {                  // low fence against the front of the box
+    ctx.beginPath(); ctx.moveTo(...P(-0.02, B + 0.01)); ctx.lineTo(...P(1.02, B + 0.01)); ctx.stroke();
+  } else {                                   // end panel at the far end, and the height gauge
+    ctx.beginPath(); ctx.moveTo(...P(L + 0.005, -0.02)); ctx.lineTo(...P(L + 0.005, 1.04)); ctx.stroke();
+    const [gx, gy] = P(Math.min(L + 0.07, 0.96), Math.min(B + 0.2, 0.9)), postH = H * 0.32;
+    ctx.lineWidth = 6 * k; ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(gx, gy - postH); ctx.stroke();
+    ctx.lineWidth = Math.max(1, k); ctx.strokeStyle = '#111'; ctx.fillStyle = '#111';
+    for (let cm = 0; cm <= 50; cm++) {
+      const y = gy - (cm / 50) * postH, len = (cm % 5 ? 5 : 10) * k;
+      ctx.beginPath(); ctx.moveTo(gx + 4 * k, y); ctx.lineTo(gx + 4 * k + len, y); ctx.stroke();
+      if (cm % 10 === 0) ctx.fillText(String(cm), gx + 18 * k, y + 4 * k);
+    }
+    const ay = gy - (Number(t.height) / 50) * postH;
+    ctx.strokeStyle = '#7a4b22'; ctx.lineWidth = 5 * k;
+    ctx.beginPath(); ctx.moveTo(gx - 70 * k, ay); ctx.lineTo(gx, ay); ctx.stroke();
   }
 }
 
 function drawScene(ctx, W, H, scene, jx, jy) {
-  const k = W / 1280;
+  const k = W / 1280, kind = String(scene.kind || '').replace(/^measure-/, ''), t = scene.truth || DEFAULT_TRUTH;
+  const withLabel = scene.label !== false;
   ctx.save();
   ctx.translate(jx * k, jy * k);
-  if (scene.kind === 'label') {
+  if (kind === 'label') {
     ctx.fillStyle = '#b98b5a'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
     noise(ctx, W, H, 7, 0.25);
     label(ctx, W * 0.25, H * 0.18, W * 0.5, H * 0.62, scene.code, k);
-  } else if (scene.kind === 'scale') {
+  } else if (kind === 'scale') {
     ctx.fillStyle = '#d9d9d6'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
     noise(ctx, W, H, 11, 0.15);
     ctx.fillStyle = '#555'; ctx.fillRect(W * 0.2, H * 0.35, W * 0.6, H * 0.55);           // platform
     ctx.fillStyle = '#c8a46e'; ctx.fillRect(W * 0.08, H * 0.42, W * 0.84, H * 0.3);       // the box
-    label(ctx, W * 0.42, H * 0.45, W * 0.16, H * 0.22, scene.code, k * 0.35);
+    if (withLabel) label(ctx, W * 0.42, H * 0.45, W * 0.16, H * 0.22, scene.code, k * 0.35);
     ctx.fillStyle = '#122'; ctx.fillRect(W * 0.66, H * 0.05, W * 0.26, H * 0.2);           // display
     ctx.fillStyle = '#6f6'; ctx.font = `bold ${Math.round(60 * k)}px monospace`;
-    ctx.fillText(scene.weight || '16.85', W * 0.68, H * 0.2);
-  } else if (scene.kind === 'boxes') {
+    ctx.fillText(Number(t.weight).toFixed(2), W * 0.68, H * 0.2);
+  } else if (kind === 'boxes') {
     ctx.fillStyle = '#e8e8e4'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
     noise(ctx, W, H, 5, 0.15);
     ctx.fillStyle = '#c8a46e'; ctx.fillRect(W * 0.05, H * 0.2, W * 0.42, H * 0.6); ctx.fillRect(W * 0.53, H * 0.25, W * 0.42, H * 0.55);
     label(ctx, W * 0.14, H * 0.3, W * 0.24, H * 0.36, scene.code, k * 0.5);
     label(ctx, W * 0.62, H * 0.33, W * 0.24, H * 0.36, scene.code2 || scene.code, k * 0.5);
-  } else {   // bay: breadth or length-height
-    ctx.fillStyle = '#9a9a96'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
-    ctx.fillStyle = '#f2f2ee';
-    ctx.beginPath(); ctx.moveTo(W * 0.12, H * 0.22); ctx.lineTo(W * 0.88, H * 0.22); ctx.lineTo(W * 0.97, H * 0.85); ctx.lineTo(W * 0.03, H * 0.85); ctx.closePath(); ctx.fill();
-    noise(ctx, W, H, 3, 0.08);
-    scaleStrip(ctx, W * 0.04, H * 0.8, W * 0.96, H * 0.8, 180, k);       // scale L
-    scaleStrip(ctx, W * 0.12, H * 0.24, W * 0.05, H * 0.78, 75, k);       // B1
-    scaleStrip(ctx, W * 0.87, H * 0.24, W * 0.95, H * 0.78, 75, k);       // B2
-    ctx.fillStyle = '#c8a46e'; ctx.fillRect(W * 0.14, H * 0.25, W * 0.5, H * 0.24);       // the box, back-left
-    label(ctx, W * 0.33, H * 0.28, W * 0.12, H * 0.17, scene.code, k * 0.28);
-    ctx.fillStyle = '#7a4b22';
-    if (scene.kind === 'breadth') ctx.fillRect(W * 0.1, H * 0.49, W * 0.8, H * 0.025);   // low fence
-    else { ctx.fillRect(W * 0.64, H * 0.22, W * 0.02, H * 0.6); ctx.fillRect(W * 0.3, H * 0.12, W * 0.015, H * 0.16); }   // end panel + gauge
+  } else {   // bay: breadth or length-height, boards placed at the box's true size
+    drawBay(ctx, W, H, kind, t, scene.code, withLabel, k);
   }
   ctx.restore();
 }
@@ -137,8 +165,9 @@ export class DemoCamera {
   paint(ctx, W, H, jx, jy) {
     drawScene(ctx, W, H, this.scene, jx, jy);
     ctx.filter = 'none';
-    if (this.ctrl.cover) hand(ctx, W, H, this.scene.kind);
-    if (this.ctrl.glare) glare(ctx, W, H, this.scene.kind);
+    const kind = String(this.scene.kind || '').replace(/^measure-/, '');
+    if (this.ctrl.cover) hand(ctx, W, H, kind);
+    if (this.ctrl.glare) glare(ctx, W, H, kind);
   }
 
   setScene(scene) {

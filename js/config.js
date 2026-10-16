@@ -1,7 +1,7 @@
 // TFC Packing Proof - settings that are safe to publish.
 // The station key is NOT here and must never be: it is typed once on the phone (Settings).
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.1.0';
 
 // The Apps Script web-app URL (.../exec). Not a secret: the script refuses anything without the station key.
 // Fill it in before uploading to GitHub Pages, or paste it in Settings on the phone (Settings wins).
@@ -12,11 +12,31 @@ export const MAX_JPEG_BYTES = 1990000;
 export const MAX_LONG_SIDE = 4000;      // SOP: about 3,000 to 4,000 px on the long side
 export const MIN_QUALITY = 0.80;        // below this the photo shrinks instead of losing more quality
 
-// Capture order per box (SOP steps 7-9): label (photo 1), breadth (photo 4), length-height (photo 3), weight (photo 2).
+// Image-first (v1.1): before the label, three READING photos per box; the numbers to book are read from them.
+// Order follows the SOP: weigh, length and height in the bay, then breadth at the fence.
+export const MEASURE_KINDS = ['measure-scale', 'measure-length-height', 'measure-breadth'];
+// After booking and labelling, the PROOF photos per box (SOP steps 7-9): label (photo 1), breadth (photo 4),
+// length-height (photo 3), weight (photo 2). Every proof photo shows the label.
 export const BOX_KINDS = ['label', 'breadth', 'length-height', 'scale'];
 export const ALL_KINDS = ['label', 'scale', 'length-height', 'breadth', 'boxes'];
+export const READ_LONG_SIDE = 2576;   // the reader's largest useful image size
 
 export const KIND_INFO = {
+  'measure-scale': {
+    photo: 'R1', title: 'Weight reading', mount: 'scale', step: 1,
+    place: 'Put the box on the scale, resting only on the platform with both ends clear of the floor. Phone on the SCALE mount.',
+    shows: 'The settled reading on the display and the whole box on the platform. The app reads the weight from this photo.',
+  },
+  'measure-length-height': {
+    photo: 'R2', title: 'Length and height reading', mount: 'bay', step: 2,
+    place: 'Box in the back-left corner. End panel against the far end, gauge arm on the highest point. Phone on the BAY mount.',
+    shows: 'The end panel on scale L and the gauge arm on its scale. The app reads length and height from this photo.',
+  },
+  'measure-breadth': {
+    photo: 'R3', title: 'Breadth reading', mount: 'bay', step: 3,
+    place: 'Lift the panel and gauge away. Slide the low fence against the widest bulge until B1 and B2 read the same.',
+    shows: 'The fence on scales B1 and B2. The app reads the breadth from this photo.',
+  },
   'label': {
     photo: 1, title: 'Label', mount: null,
     place: 'Hold the phone about 25 cm above the new label.',
@@ -47,7 +67,10 @@ export const KIND_INFO = {
 // Starting levels for the automatic checks. Calibrate on day one (Settings shows the live numbers).
 // Sharpness uses the same score as the 15 Oct frame trial: variance of an edge map on a 540x960 grey copy.
 export const DEFAULT_LEVELS = {
-  sharp: { 'label': 300, 'breadth': 150, 'length-height': 150, 'scale': 120, 'boxes': 120 },
+  sharp: {
+    'label': 300, 'breadth': 150, 'length-height': 150, 'scale': 120, 'boxes': 120,
+    'measure-scale': 120, 'measure-length-height': 150, 'measure-breadth': 150,
+  },
   peakRatio: 0.85,        // a frame must be at least this share of the sharpest frame in the last 3 s
   stillRatio: 0.70,       // the full-size still must keep at least this share of the trigger frame's score
   steadyMs: 500,          // "the picture barely changes for half a second"

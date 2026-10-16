@@ -7,6 +7,36 @@ import { buildExif, insertExif } from './exif.js';
 
 const cancelled = new Set();
 
+// Outlines and crops are set on the live preview (usually 16:9); the still is usually 4:3, and the preview shows
+// the middle of it. Map a preview point (0..1) onto the still.
+function mapper(previewAspect, stillW, stillH) {
+  const sa = stillW / stillH, pa = previewAspect || sa;
+  if (Math.abs(sa - pa) < 0.01) return (p) => p;
+  if (sa < pa) { const k = sa / pa; return ([x, y]) => [x, 0.5 + (y - 0.5) * k]; }   // still is taller
+  const k = pa / sa;
+  return ([x, y]) => [0.5 + (x - 0.5) * k, y];                                         // still is wider
+}
+
+// Images for the reader: the whole still (at most `long` px) and close-ups of the printed scales.
+async function readImages(bitmap, read, map) {
+  const W = bitmap.width, H = bitmap.height, out = [];
+  const enc = async (sx, sy, sw, sh, label) => {
+    const s = Math.min(1, read.long / Math.max(sw, sh)), w = Math.max(1, Math.round(sw * s)), h = Math.max(1, Math.round(sh * s));
+    const c = new OffscreenCanvas(w, h), ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, w, h);
+    out.push({ label, blob: await c.convertToBlob({ type: 'image/jpeg', quality: read.quality || 0.85 }) });
+  };
+  await enc(0, 0, W, H, 'the whole photo');
+  for (const cr of read.crops || []) {
+    const [a, b] = [map([cr.rect[0], cr.rect[1]]), map([cr.rect[2], cr.rect[3]])];
+    const x0 = Math.max(0, Math.floor(Math.min(a[0], b[0]) * W)), y0 = Math.max(0, Math.floor(Math.min(a[1], b[1]) * H));
+    const x1 = Math.min(W, Math.ceil(Math.max(a[0], b[0]) * W)), y1 = Math.min(H, Math.ceil(Math.max(a[1], b[1]) * H));
+    if (x1 - x0 > 32 && y1 - y0 > 32) await enc(x0, y0, x1 - x0, y1 - y0, cr.label);
+  }
+  return out;
+}
+
 // Largest size first: keep the resolution and the best quality that fits; only if even MIN_QUALITY is too
 // big, shrink the image (JPEG size grows roughly with the pixel count) and try again.
 async function fitJpeg(bitmap, maxLong, budget, minQ, stop) {
@@ -41,6 +71,15 @@ async function fitJpeg(bitmap, maxLong, budget, minQ, stop) {
 self.onmessage = async (ev) => {
   const job = ev.data;
   if (job.cancel) { cancelled.add(job.cancel); return; }
+  if (job.readOnly) {   // "read again": the reader images from a stored photo, nothing else
+    try {
+      const bitmap = await createImageBitmap(job.blob);
+      const read = await readImages(bitmap, job.readOnly, mapper(job.previewAspect, bitmap.width, bitmap.height));
+      bitmap.close();
+      self.postMessage({ id: job.id, phase: 'done', ok: true, read });
+    } catch (err) { self.postMessage({ id: job.id, phase: 'error', ok: false, error: String((err && err.message) || err) }); }
+    return;
+  }
   const t0 = performance.now();
   let bitmap = null;
   try {
@@ -48,8 +87,9 @@ self.onmessage = async (ev) => {
     const srcW = bitmap.width, srcH = bitmap.height;
 
     // Checks on the still, at the same 540x960 analysis size as the preview.
+    const map = mapper(job.previewAspect, srcW, srcH);
     const actx = new OffscreenCanvas(540, 960).getContext('2d', { willReadFrequently: true });
-    const m = measure(actx, bitmap, srcW, srcH, job.zone, job.spotShare);
+    const m = measure(actx, bitmap, srcW, srcH, job.zone ? job.zone.map(map) : null, job.spotShare);
     // Extra: sharpness of a 1080 px centre crop at full size (for the record; not a gate).
     const cs = Math.min(1080, srcW, srcH), cx = Math.round((srcW - cs) / 2), cy = Math.round((srcH - cs) / 2);
     const cctx = new OffscreenCanvas(cs, cs).getContext('2d', { willReadFrequently: true });
@@ -64,8 +104,9 @@ self.onmessage = async (ev) => {
     const ps = Math.min(1, 1280 / Math.max(srcW, srcH)), pc = new OffscreenCanvas(Math.round(srcW * ps), Math.round(srcH * ps));
     pc.getContext('2d').drawImage(bitmap, 0, 0, pc.width, pc.height);
     const preview = await pc.convertToBlob({ type: 'image/jpeg', quality: 0.8 });
+    const read = job.read ? await readImages(bitmap, job.read, map) : null;
     self.postMessage({
-      id: job.id, phase: 'checked', ok: true, src: { w: srcW, h: srcH }, probe, preview,
+      id: job.id, phase: 'checked', ok: true, src: { w: srcW, h: srcH }, probe, preview, read,
       metrics: { sharp: m.sharp, bright: m.bright, glare: m.glare, spot: m.spot, worst: m.worst, hiSharp }, ms: Math.round(performance.now() - t0),
     }, probe ? [probe] : []);
 

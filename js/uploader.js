@@ -3,7 +3,7 @@
 // Wire format: POST, Content-Type text/plain (no CORS pre-flight), body = JSON. The reply is JSON.
 import * as db from './store.js';
 import { APP_VERSION } from './config.js';
-import { rowSnapshot, nextNn } from './records.js';
+import { rowSnapshot, nextNn, listFor, upgradeBox } from './records.js';
 import { photoName, isoLocal } from './logic.js';
 
 export function blobToBase64(blob) {
@@ -118,7 +118,7 @@ export class Uploader {
     const sid = item.type === 'photo' ? ((await db.get('photos', item.photo_id)) || {}).shipment_id : item.shipment_id;
     const s = sid && (await db.get('shipments', sid));
     if (!s) { await db.del('queue', item.seq); return 'done'; }
-    const boxes = (await db.byIndex('boxes', 'shipment', s.id)).sort((a, b) => a.n - b.n);
+    const boxes = (await db.byIndex('boxes', 'shipment', s.id)).map(upgradeBox).sort((a, b) => a.n - b.n);
     const photos = await db.byIndex('photos', 'shipment', s.id);
     const byId = Object.fromEntries(photos.map((p) => [p.id, p]));
 
@@ -132,9 +132,9 @@ export class Uploader {
 
     // photo
     const p = byId[item.photo_id];
-    if (!p || (p.upload && p.upload.state === 'done')) { await db.del('queue', item.seq); return 'done'; }
+    if (!p || !p.name || !p.blob || (p.upload && p.upload.state === 'done')) { await db.del('queue', item.seq); return 'done'; }
     const b = p.box_id ? boxes.find((x) => x.id === p.box_id) : null;
-    const list = p.kind === 'boxes' ? s.boxes_photo : b.photos[p.kind];
+    const list = listFor(s, b, p.kind);
     const rows = (p.kind === 'boxes' ? boxes : [b]).map((x) => rowSnapshot(s, x, byId));
     this.state.sending = p.name; this.report();
     const payload = {

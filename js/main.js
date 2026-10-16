@@ -1,11 +1,14 @@
-// TFC Packing Proof - the station app. Runs the SOP routine: new box record -> typed readings -> numbers to book
-// -> scan the new label (attaches the AWB) -> label photo -> breadth -> length-height -> weight photo.
+// TFC Packing Proof - the station app. Runs the SOP routine, image-first (v1.1): new box -> three READING photos
+// (weight, length-height, breadth) from which the reader (Claude, via the backend) takes the numbers -> check and
+// book (one tap; typing only to fix) -> scan the new label (attaches the AWB) -> label photo -> breadth ->
+// length-height -> weight PROOF photos, each re-read and compared with the booking.
 // Photos are taken automatically only when the frame is sharp, steady and well lit, re-checked on the full-size
 // still, saved on the phone first and uploaded from a queue.
-import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, KIND_INFO, BOX_KINDS, MAX_JPEG_BYTES, MAX_LONG_SIDE, MIN_QUALITY, DEMO_AWB, TEST_SITE, TEST_BACKEND } from './config.js';
+import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, KIND_INFO, BOX_KINDS, MEASURE_KINDS, READ_LONG_SIDE, MAX_JPEG_BYTES, MAX_LONG_SIDE, MIN_QUALITY, DEMO_AWB, TEST_SITE, TEST_BACKEND } from './config.js';
 import * as db from './store.js';
 import * as R from './records.js';
-import { checkReading, readingWarnings, readCodes, normCode, AWB_OK, isoLocal, istDay, istParts, uuid, checksLine, bookNumbers } from './logic.js';
+import { checkReading, readingWarnings, readCodes, normCode, AWB_OK, isoLocal, istDay, istParts, uuid, checksLine, bookNumbers, bookFor } from './logic.js';
+import { readCrops, requestRead } from './reader.js';
 import { measure, shrink, changeFraction, judge } from './quality.js';
 import { Camera, listCameras } from './camera.js';
 import { DemoCamera } from './demo.js';
@@ -120,7 +123,100 @@ function stopCamera() { if (app.camera) { app.camera.stop(); app.camera = null; 
 function demoScene(kind, s, b, boxes) {
   if (!(app.camera instanceof DemoCamera)) return;
   const code = !b || b.n === 1 ? DEMO_AWB : DEMO_AWB.slice(0, -1) + b.n;
-  app.camera.setScene({ kind, code, code2: DEMO_AWB.slice(0, -1) + '2', weight: b ? b.readings.weight : '' });
+  app.camera.setScene({ kind, code, code2: DEMO_AWB.slice(0, -1) + '2', truth: b ? b.demo_truth : null, label: !kind.startsWith('measure-') });
+}
+
+// Demo camera only: the "true" size and weight of a pretend box, which the drawn station shows.
+function demoTruth() {
+  const r = (lo, hi, step) => Math.round((lo + Math.random() * (hi - lo)) / step) * step;
+  const f = (v, d) => v.toFixed(d).replace(/\.0+$/, '');
+  return { weight: r(3, 24, 0.05).toFixed(2), length: f(r(60, 150, 0.5), 1), breadth: f(r(15, 34, 0.5), 1), height: f(r(14, 32, 0.5), 1) };
+}
+
+// ---------------------------------------------------------------- reading the numbers (background)
+// Box records are only changed through R.updateBox (one writer at a time, always on a fresh copy).
+const liveReads = new Set();
+const rereadListeners = new Map();
+
+function readsChanged(sid) {
+  const [r, a] = parts();
+  if (!$('#modal').classList.contains('hidden')) return;   // never redraw under an open question
+  if ((r === 'book' || r === 's' || r === 'done') && a === sid) render();
+  else if (r === 'mb' && String(a).startsWith(sid)) render();
+}
+
+async function startMeasureRead(sid, boxId, kind, photoId, images) {
+  const key = `${boxId}|${kind}`;
+  liveReads.add(key);
+  try {
+    await R.updateBox(boxId, (b) => { b.read_jobs[kind] = { status: 'reading', at: isoLocal(), photo_id: photoId }; });
+    readsChanged(sid);
+    const truth = (await db.get('boxes', boxId) || {}).demo_truth;
+    const r = await requestRead(app.settings, kind, images, truth);
+    await R.updateBox(boxId, (b) => {
+      R.applyRead(b, kind, photoId, r);
+      if (r.ok && r.split) b.read_jobs[kind].warn = r.split;
+      if (r.ok && kind === 'measure-scale' && r.flags && (r.flags.on_platform_only === false || r.flags.display_steady === false)) {
+        b.read_jobs[kind].warn = [r.flags.on_platform_only === false ? 'the box may not be resting only on the platform' : '',
+          r.flags.display_steady === false ? 'the display may not have settled' : ''].filter(Boolean).join('; ');
+      }
+    });
+    const d = await R.load(sid);
+    if (d) await rowsChanged(d.s, d.boxes.filter((x) => x.id === boxId));
+  } finally {
+    liveReads.delete(key);
+    readsChanged(sid);
+  }
+}
+
+// "Read again" from the stored reading photo.
+async function rereadFromPhoto(sid, boxId, kind) {
+  const d = await R.load(sid);
+  const b = d && d.boxes.find((x) => x.id === boxId);
+  const p = b && R.finalPhoto(b.measure[kind], d.byId);
+  if (!p || !p.blob) { toast('That reading photo is no longer on the phone - retake it', 'bad'); return; }
+  const aspect = (p.checks && p.checks.preview_aspect) || p.width / p.height;
+  const res = await stillJob({ readOnly: { long: READ_LONG_SIDE, quality: 0.85, crops: readCrops(kind, app.settings.calib, aspect) }, blob: p.blob, previewAspect: aspect }).done;
+  if (!res.ok) { toast('Could not prepare the photo: ' + res.error, 'bad'); return; }
+  startMeasureRead(sid, boxId, kind, p.id, res.read);
+}
+
+// The proof photos are read again and compared with what was booked (a warning, never a block).
+async function startRecheck(sid, boxId, kind, photoId, images) {
+  const b0 = await db.get('boxes', boxId);
+  const r = await requestRead(app.settings, kind, images, b0 && b0.demo_truth);
+  const p = await db.get('photos', photoId), b = R.upgradeBox(await db.get('boxes', boxId));
+  if (!p || !b) return;
+  const fields = kind === 'scale' ? ['weight'] : kind === 'length-height' ? ['length', 'height'] : ['breadth'];
+  if (!r.ok) p.reread = { status: 'failed', error: r.error || r.code, at: isoLocal() };
+  else {
+    const diffs = [];
+    for (const f of fields) {
+      const v = r.values[f];
+      if (!v) { diffs.push(`${f} not readable in this photo`); continue; }
+      const nb = bookFor(f, v);
+      if (b.book && String(nb) !== String(b.book[f])) diffs.push(`${f} reads ${v} (books as ${nb}) but ${b.book[f]} was booked`);
+    }
+    p.reread = { status: 'done', values: r.values, mismatch: diffs.join('; '), at: isoLocal() };
+  }
+  await db.put('photos', p);
+  const d = await R.load(sid);
+  if (d) await rowsChanged(d.s, d.boxes.filter((x) => x.id === boxId));
+  const fn = rereadListeners.get(photoId);
+  if (fn) fn(p.reread);
+  readsChanged(sid);
+}
+
+function fieldLine(b, f) {
+  const unit = f === 'weight' ? 'kg' : 'cm', v = b.readings[f], src = b.reads[f];
+  const job = b.read_jobs[f === 'weight' ? 'measure-scale' : f === 'breadth' ? 'measure-breadth' : 'measure-length-height'];
+  if (v && !checkReading(f, v)) {
+    const how = src && src.source === 'typed' ? `typed${src.read_value ? `, read ${esc(src.read_value)}` : ''}` : `read${src && src.confidence ? ', ' + esc(src.confidence) : ''}`;
+    return { ok: true, html: `<b>${esc(v)} ${unit}</b> <span class="small muted">(${how})</span>`, conf: src && src.confidence, typed: src && src.source === 'typed' };
+  }
+  if (job && job.status === 'reading') return { html: '<span class="muted">reading…</span>', pending: true };
+  if (job && (job.status === 'failed' || job.status === 'partial')) return { html: `<span style="color:var(--bad)">not read</span> <span class="small muted">${esc(job.error || 'unclear in the photo')}</span>`, failed: true };
+  return { html: '<span class="muted">no photo yet</span>' };
 }
 
 // ---------------------------------------------------------------- uploads
@@ -174,6 +270,7 @@ async function doRender() {
       case 'settings': return await screenSettings();
       case 's': return await screenShipment(a);
       case 'm': return await screenMeasure(a, b);
+      case 'mb': return await screenBoxReadings(a);
       case 'book': return await screenBook(a);
       case 'cap': return await screenCapture(a, b, c);
       case 'done': return await screenDone(a);
@@ -225,8 +322,24 @@ async function screenHome() {
     <div class="list">${done.map(item).join('') || '<p class="muted">None yet.</p>'}</div>
     <p class="small muted" style="margin-top:24px">v${APP_VERSION} · <a href="#/settings">Settings</a> · <a href="#/queue">Uploads</a>${monday ? '' : ' · <a href="#/scale-test">Scale test</a>'}</p>
   </main>`);
-  $('#new').onclick = async () => { const { b } = await R.createShipment(app.settings); go(`#/m/${encodeURIComponent(b.id)}`); };
+  $('#new').onclick = startNewBox;
   const r = $('#retry'); if (r) r.onclick = () => app.uploader.retryNow();
+}
+
+// ---------------------------------------------------------------- new box / another box: straight to the reading photos
+async function startNewBox() {
+  const { s, b } = await R.createShipment(app.settings);
+  if (app.settings.demo) { b.demo_truth = demoTruth(); await db.put('boxes', b); }
+  go(`#/cap/${encodeURIComponent(s.id)}/${encodeURIComponent(b.id)}/measure-scale`);
+}
+async function addAnotherBox(s) {
+  const b = await R.addBox(s);
+  if (app.settings.demo) { b.demo_truth = demoTruth(); await db.put('boxes', b); }
+  go(`#/cap/${encodeURIComponent(s.id)}/${encodeURIComponent(b.id)}/measure-scale`);
+}
+function measureNextHash(s, b) {
+  const k = MEASURE_KINDS.find((x) => !(b.measure[x] || []).length);
+  return k ? `#/cap/${encodeURIComponent(s.id)}/${encodeURIComponent(b.id)}/${k}` : `#/mb/${encodeURIComponent(b.id)}`;
 }
 
 // ---------------------------------------------------------------- one order (shipment)
@@ -237,7 +350,7 @@ function bookGrid(b) {
     `<div><small>Height</small><b>${k.height ?? '-'}</b><span>cm</span></div>` +
     `<div><small>Weight</small><b>${k.weight ?? '-'}</b><span>kg</span></div></div>`;
 }
-const measuredLine = (b) => `Measured: L ${esc(b.readings.length || '-')} · B ${esc(b.readings.breadth || '-')} · H ${esc(b.readings.height || '-')} cm · ${esc(b.readings.weight || '-')} kg`;
+const measuredLine = (b) => `Readings: L ${esc(b.readings.length || '-')} · B ${esc(b.readings.breadth || '-')} · H ${esc(b.readings.height || '-')} cm · ${esc(b.readings.weight || '-')} kg`;
 
 async function screenShipment(sid) {
   const d = await R.load(sid);
@@ -247,12 +360,11 @@ async function screenShipment(sid) {
   const boxCard = (b) => `<div class="card"><h3>Box ${b.n}${multi ? ' of ' + boxes.length : ''} · ${esc(R.boxStatus(s, b))}</h3>
       ${R.readingsDone(b) ? bookGrid(b) + `<div class="small muted">${measuredLine(b)}</div>` : `<p class="muted">${measuredLine(b)}</p>`}
       ${s.booked_at ? `<div class="small" style="margin-top:6px">Photos: label ${kindMark(b, 'label')} · breadth ${kindMark(b, 'breadth')} · length-height ${kindMark(b, 'length-height')} · weight ${kindMark(b, 'scale')}${b.label && b.label.child ? ` · box label <span class="awb">${esc(b.label.code)}</span>` : ''}</div>` : ''}
-      ${!s.booked_at && !s.cancelled_at ? `<button class="wide" style="margin-top:8px" data-edit="${esc(b.id)}">${R.readingsDone(b) ? 'Edit readings' : 'Measure this box'}</button>` : ''}
+      ${!s.booked_at && !s.cancelled_at ? `<div class="row" style="margin-top:8px"><button data-meas="${esc(b.id)}">${R.measureDone(b) ? 'Readings of this box' : 'Take the reading photos'}</button><button data-edit="${esc(b.id)}">Type readings</button></div>` : ''}
     </div>`;
   let main = '';
   if (s.cancelled_at) main = `<div class="card bad"><b>Cancelled</b> ${esc(s.cancel_reason)}</div>`;
-  else if (nx.screen === 'measure') main = `<button class="big primary" id="next">Measure box ${nx.box.n}</button>`;
-  else if (nx.screen === 'book') main = `<button class="big primary" id="next">Numbers to book</button>`;
+  else if (nx.screen === 'book') main = `<button class="big primary" id="next">Check readings and book</button>`;
   else if (nx.screen === 'capture') main = `<button class="big primary" id="next">Continue: ${nx.kind === 'boxes' ? 'photo of all boxes' : `box ${nx.box.n} ${KIND_INFO[nx.kind].title.toLowerCase()} photo`}</button>`;
   else main = `<div class="card go"><b>All photos taken ✓</b></div>`;
   view(`${bar(s.awb ? 'AWB ' + fmtAwb(s.awb) : 'New order record')}<main>
@@ -267,15 +379,15 @@ async function screenShipment(sid) {
   </main>`);
   const nextBtn = $('#next');
   if (nextBtn) nextBtn.onclick = () => {
-    if (nx.screen === 'measure') go(`#/m/${encodeURIComponent(nx.box.id)}`);
-    else if (nx.screen === 'book') go(`#/book/${encodeURIComponent(sid)}`);
+    if (nx.screen === 'book') go(`#/book/${encodeURIComponent(sid)}`);
     else go(`#/cap/${encodeURIComponent(sid)}/${nx.box ? encodeURIComponent(nx.box.id) : 'all'}/${nx.kind}`);
   };
   for (const btn of document.querySelectorAll('[data-edit]')) btn.onclick = () => go(`#/m/${encodeURIComponent(btn.dataset.edit)}`);
+  for (const btn of document.querySelectorAll('[data-meas]')) btn.onclick = () => go(measureNextHash(s, boxes.find((x) => x.id === btn.dataset.meas)));
   const oref = $('#oref');
   if (oref) oref.onchange = async () => { s.order_ref = oref.value.trim().toUpperCase(); await db.put('shipments', s); await rowsChanged(s, boxes); toast('Order no. saved'); };
   const add = $('#add');
-  if (add) add.onclick = async () => { const b = await R.addBox(s); go(`#/m/${encodeURIComponent(b.id)}`); };
+  if (add) add.onclick = () => addAnotherBox(s);
   const rm = $('#remove');
   if (rm) rm.onclick = async () => { await R.removeLastBox(s); render(); };
   const cancel = $('#cancel');
@@ -298,8 +410,9 @@ function firstMissing(b) {
   return 'sum';
 }
 
+// Typing the readings: the fallback when a reading photo cannot be read (or for a quick fix).
 async function screenMeasure(boxId, step) {
-  const b = await db.get('boxes', boxId);
+  const b = R.upgradeBox(await db.get('boxes', boxId));
   if (!b) return go('#/');
   const s = await db.get('shipments', b.shipment_id);
   if (s.booked_at || s.cancelled_at) return go(`#/s/${encodeURIComponent(s.id)}`);
@@ -328,11 +441,11 @@ async function screenMeasure(boxId, step) {
     const warns = readingWarnings(b.readings);
     body = `<div class="instr"><b>Readings saved.</b></div>${bookGrid(b)}<p class="small muted">${measuredLine(b)}</p>
       ${warns.map((w) => `<div class="card warn">${esc(w)}</div>`).join('')}
-      <button class="big primary" id="tobook">All boxes measured: numbers to book</button>
+      <button class="big primary" id="tobook">All boxes measured: check and book</button>
       <button class="wide" id="another" style="margin-top:10px">+ Another box in this order</button>
       <button class="wide" id="redo" style="margin-top:10px">Edit these readings</button>`;
   }
-  view(`${bar(head, `#/s/${encodeURIComponent(s.id)}`)}<main><div class="step">Step ${stepNo} of 5 · ${head}</div>${body}
+  view(`${bar(head + ' · type readings', `#/s/${encodeURIComponent(s.id)}`)}<main><div class="step">Typing instead of reading · step ${stepNo} of 5 · ${head}</div>${body}
     ${step !== 'sum' ? `<div class="row" style="margin-top:18px"><button id="back">Back</button><button class="primary" id="ok">${step === 'bay' ? 'It is in the bay' : 'Next'}</button></div>` : ''}
   </main>`);
   const idx = MSTEPS.indexOf(step);
@@ -371,37 +484,114 @@ async function screenMeasure(boxId, step) {
   const tb = $('#tobook');
   if (tb) tb.onclick = async () => {
     const all = (await db.byIndex('boxes', 'shipment', s.id)).sort((x, y) => x.n - y.n);
-    const open = all.find((x) => !R.readingsDone(x));
-    if (open) { toast(`Box ${open.n} still needs its readings`, 'bad'); return go(`#/m/${encodeURIComponent(open.id)}`); }
+    const open = all.map(R.upgradeBox).find((x) => !R.readingsDone(x) && !R.measureDone(x));
+    if (open) { toast(`Box ${open.n} still needs its readings`, 'bad'); return go(measureNextHash(s, open)); }
     go(`#/book/${encodeURIComponent(s.id)}`);
   };
   const an = $('#another');
-  if (an) an.onclick = async () => { const nb = await R.addBox(s); go(`#/m/${encodeURIComponent(nb.id)}`); };
+  if (an) an.onclick = () => addAnotherBox(s);
   const redo = $('#redo');
   if (redo) redo.onclick = () => goStep('weigh');
 }
 
-// ---------------------------------------------------------------- numbers to book (SOP step 6)
+// ---------------------------------------------------------------- the readings of a box (read from its photos)
+const FIELD_NAMES = { weight: 'Weight', length: 'Length', breadth: 'Breadth', height: 'Height' };
+const KIND_SHORT = { 'measure-scale': 'weight', 'measure-length-height': 'length + height', 'measure-breadth': 'breadth' };
+
+function readingsCard(s, b, byId, urls) {
+  const rows = ['weight', 'length', 'breadth', 'height'].map((f) => {
+    const L = fieldLine(b, f), check = L.ok && !L.typed && L.conf && L.conf !== 'high';
+    return `<tr><th>${FIELD_NAMES[f]}</th><td>${L.html}${check ? ' <span class="chip wait">check the photo</span>' : ''}</td>` +
+      `<td>${s.booked_at ? '' : `<button class="mini" data-fix="${esc(b.id)}|${f}">${L.ok ? 'Fix' : 'Type'}</button>`}</td></tr>`;
+  }).join('');
+  const photos = MEASURE_KINDS.map((k) => {
+    const p = R.finalPhoto(b.measure[k] || [], byId), j = b.read_jobs[k] || {};
+    let img = '<div class="noimg">no photo</div>';
+    if (p && p.blob) { const u = URL.createObjectURL(p.blob); urls.push(u); img = `<img src="${u}" alt="" data-full="${u}">`; }
+    const again = !s.booked_at && p && (j.status === 'failed' || j.status === 'partial') ? `<button class="mini" data-again="${esc(b.id)}|${k}">Read again</button>` : '';
+    const retake = !s.booked_at ? `<button class="mini" data-retake="${esc(b.id)}|${k}">${p ? 'Retake' : 'Take'}</button>` : '';
+    return `<figure>${img}<figcaption>${KIND_SHORT[k]}${j.status === 'reading' ? ' · reading…' : ''}<br>${again}${retake}</figcaption></figure>`;
+  }).join('');
+  const warns = MEASURE_KINDS.map((k) => (b.read_jobs[k] || {}).warn).filter(Boolean);
+  return `<table class="readings">${rows}</table>${warns.map((w) => `<div class="card warn small">${esc(w)}</div>`).join('')}<div class="thumbs">${photos}</div>`;
+}
+
+function wireReadings(sid) {
+  for (const btn of document.querySelectorAll('[data-fix]')) btn.onclick = async () => {
+    const [boxId, f] = btn.dataset.fix.split('|'), b = R.upgradeBox(await db.get('boxes', boxId)), unit = f === 'weight' ? 'kg' : 'cm';
+    const v = await modal(`<h3>${FIELD_NAMES[f]} (${unit})</h3><p class="small muted">Type what the ${f === 'weight' ? 'scale display' : 'scale'} shows in the photo. The reading is kept beside it.</p>
+      <input class="reading" type="text" inputmode="decimal" id="fixv" value="${esc(b.readings[f])}"><div class="err" id="fixe"></div>
+      <div class="row"><button id="no">Back</button><button class="primary" id="yes">Save</button></div>`,
+    (m, close) => {
+      setTimeout(() => $('#fixv', m).select(), 50);
+      $('#no', m).onclick = () => close(null);
+      $('#yes', m).onclick = () => { const x = $('#fixv', m).value.trim().replace(',', '.'), e = checkReading(f, x); if (e) { $('#fixe', m).textContent = e; return; } close(x); };
+    });
+    if (v === null) return;
+    await R.saveReadings(R.upgradeBox(await db.get('boxes', boxId)), { [f]: v });
+    const d = await R.load(sid); await rowsChanged(d.s, d.boxes.filter((x) => x.id === boxId));
+    render();
+  };
+  for (const btn of document.querySelectorAll('[data-again]')) btn.onclick = () => { const [boxId, k] = btn.dataset.again.split('|'); rereadFromPhoto(sid, boxId, k); toast('Reading again…'); };
+  for (const btn of document.querySelectorAll('[data-retake]')) btn.onclick = () => { const [boxId, k] = btn.dataset.retake.split('|'); go(`#/cap/${encodeURIComponent(sid)}/${encodeURIComponent(boxId)}/${k}`); };
+  for (const img of document.querySelectorAll('.thumbs img')) img.onclick = () => modal(`<img src="${img.dataset.full}" alt="" style="width:100%;border-radius:10px"><div class="row"><button id="x">Close</button></div>`, (m, close) => { $('#x', m).onclick = () => close(); });
+}
+
+async function screenBoxReadings(boxId) {
+  const b0 = await db.get('boxes', boxId);
+  if (!b0) return go('#/');
+  const d = await R.load(b0.shipment_id), { s, boxes, byId } = d, b = boxes.find((x) => x.id === boxId);
+  if (s.booked_at || s.cancelled_at) return go(`#/s/${encodeURIComponent(s.id)}`);
+  const urls = [];
+  app.cleanup = () => urls.forEach((u) => URL.revokeObjectURL(u));
+  view(`${bar(`Box ${b.n}${boxes.length > 1 ? ' of ' + boxes.length : ''} · readings`, `#/s/${encodeURIComponent(s.id)}`)}<main>
+    <div class="instr"><b>Reading photos taken.</b> ${R.readsPending(b) ? 'The numbers are being read from them - a few seconds.' : 'Check the numbers below.'}</div>
+    <div class="card">${readingsCard(s, b, byId, urls)}</div>
+    <button class="big primary" id="tobook">All boxes measured: check and book</button>
+    <button class="wide" id="another" style="margin-top:10px">+ Another box in this order</button>
+  </main>`);
+  wireReadings(s.id);
+  $('#tobook').onclick = () => go(`#/book/${encodeURIComponent(s.id)}`);
+  $('#another').onclick = () => addAnotherBox(s);
+}
+
+// ---------------------------------------------------------------- check readings and book (SOP step 6)
 async function screenBook(sid) {
   const d = await R.load(sid);
   if (!d) return go('#/');
-  const { s, boxes } = d, multi = boxes.length > 1;
-  const open = boxes.find((b) => !R.readingsDone(b));
-  if (open) return go(`#/m/${encodeURIComponent(open.id)}`);
+  const { s, boxes, byId } = d, multi = boxes.length > 1;
   if (s.booked_at) return go(`#/s/${encodeURIComponent(sid)}`);
-  view(`${bar('Numbers to book', `#/s/${encodeURIComponent(sid)}`)}<main>
-    <div class="instr"><b>Book with exactly these numbers.</b> Each side is rounded up to the next whole cm and the weight to the next 0.1 kg.${multi ? ' Book once, with each box\'s own numbers.' : ''}</div>
-    ${boxes.map((b) => `<div class="card">${multi ? `<h3>Box ${b.n} of ${boxes.length}</h3>` : ''}${bookGrid(b)}<div class="small muted">${measuredLine(b)}</div></div>`).join('')}
-    <div class="card warn">Print the label and stick it <b>centred on the top face</b>, with the box still in the bay. Do not edit the booking after the label prints.</div>
-    <button class="big go" id="booked">Booked - the label is on the box</button>
-    <button class="wide" id="edit" style="margin-top:10px">Edit readings</button>
+  const noPhotos = boxes.find((b) => !R.readingsDone(b) && !R.measureDone(b));
+  if (noPhotos) return go(measureNextHash(s, noPhotos));
+  const allDone = boxes.every(R.readingsDone), pending = boxes.some(R.readsPending);
+  const urls = [];
+  app.cleanup = () => urls.forEach((u) => URL.revokeObjectURL(u));
+  view(`${bar('Check and book', `#/s/${encodeURIComponent(sid)}`)}<main>
+    <div class="instr"><b>Check the readings, then book with exactly these numbers.</b> Each side is rounded up to the next whole cm and the weight to the next 0.1 kg.${multi ? ' Book once, with each box\'s own numbers.' : ''}</div>
+    ${boxes.map((b) => `<div class="card">${multi ? `<h3>Box ${b.n} of ${boxes.length}</h3>` : ''}${readingsCard(s, b, byId, urls)}${R.readingsDone(b) ? bookGrid(b) : ''}</div>`).join('')}
+    ${allDone ? '<div class="card warn">Print the label and stick it <b>centred on the top face</b>, with the box still in the bay and the fence in place. Do not edit the booking after the label prints.</div>' : ''}
+    <button class="big go" id="booked" ${allDone ? '' : 'disabled'}>${allDone ? 'Booked with these numbers - the label is on' : pending ? 'Reading the photos…' : 'Fill in the missing readings first'}</button>
   </main>`);
+  wireReadings(sid);
   $('#booked').onclick = async () => {
+    const checks = [];
+    for (const b of boxes) {
+      for (const f of ['weight', 'length', 'breadth', 'height']) {
+        const r = b.reads[f];
+        if (r && r.source === 'read' && r.confidence && r.confidence !== 'high') checks.push(`${multi ? `Box ${b.n} ` : ''}${f}: ${b.readings[f]} (read with ${r.confidence} confidence)`);
+      }
+      for (const k of MEASURE_KINDS) if ((b.read_jobs[k] || {}).warn) checks.push(`${multi ? `Box ${b.n} ` : ''}${b.read_jobs[k].warn}`);
+    }
+    if (checks.length) {
+      const okd = await modal(`<h3>Please look at the photos for these</h3><ul>${checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>
+        <p class="small muted">If a number is wrong, go back and Fix it before booking.</p><div class="row"><button id="no">Back</button><button class="go" id="yes">They are right - booked</button></div>`,
+      (m, close) => { $('#no', m).onclick = () => close(false); $('#yes', m).onclick = () => close(true); });
+      if (!okd) return;
+    }
     await R.markBooked(s);
     await rowsChanged(s, boxes);
     go(`#/cap/${encodeURIComponent(sid)}/${encodeURIComponent(boxes[0].id)}/label`);
   };
-  $('#edit').onclick = () => go(`#/s/${encodeURIComponent(sid)}`);
 }
 
 // ---------------------------------------------------------------- photos (SOP steps 7-9)
@@ -411,12 +601,19 @@ async function screenCapture(sid, bid, kind) {
   let { s, boxes, byId } = d;
   if (!KIND_INFO[kind]) return go(`#/s/${encodeURIComponent(sid)}`);
   if (s.cancelled_at) return go(`#/s/${encodeURIComponent(sid)}`);
-  if (!s.booked_at) return go(`#/book/${encodeURIComponent(sid)}`);
   const multi = boxes.length > 1;
   let b = bid === 'all' ? null : boxes.find((x) => x.id === bid) || null;
-  if (kind !== 'boxes' && !b) return go(`#/s/${encodeURIComponent(sid)}`);
-  if (kind !== 'label' && !s.awb) return go(`#/cap/${encodeURIComponent(sid)}/${encodeURIComponent(boxes[0].id)}/label`);
-  if (kind !== 'label' && kind !== 'boxes' && !b.photos.label.length) return go(`#/cap/${encodeURIComponent(sid)}/${encodeURIComponent(b.id)}/label`);
+  // Reading photos come before booking (no label yet); proof photos after it.
+  const isMeasure = kind.startsWith('measure-'), look = isMeasure ? kind.slice(8) : kind;
+  const recheck = ['breadth', 'length-height', 'scale'].includes(kind);
+  if (isMeasure) {
+    if (s.booked_at || !b) return go(`#/s/${encodeURIComponent(sid)}`);
+  } else {
+    if (!s.booked_at) return go(`#/book/${encodeURIComponent(sid)}`);
+    if (kind !== 'boxes' && !b) return go(`#/s/${encodeURIComponent(sid)}`);
+    if (kind !== 'label' && !s.awb) return go(`#/cap/${encodeURIComponent(sid)}/${encodeURIComponent(boxes[0].id)}/label`);
+    if (kind !== 'label' && kind !== 'boxes' && !b.photos.label.length) return go(`#/cap/${encodeURIComponent(sid)}/${encodeURIComponent(b.id)}/label`);
+  }
 
   const st = app.settings, lv = st.levels, info = KIND_INFO[kind];
   // Multi-box: the team taps the box number printed on the label (Box x/y) before each label photo.
@@ -444,11 +641,16 @@ async function screenCapture(sid, bid, kind) {
 
   const expected = () => (b && b.label ? b.label.code : s.awb);
   function header() {
-    const step = kind === 'boxes' ? '' : `Step ${BOX_KINDS.indexOf(kind) + 1}/4 · `;
-    $('#ttl').textContent = `${multi && b && picked ? `Box ${b.n}/${boxes.length} · ` : ''}${step}Photo ${info.photo}: ${info.title}`;
-    $('#awbline').innerHTML = s.awb
-      ? `AWB <span class="awb">${esc(fmtAwb(s.awb))}</span>${b && b.label && b.label.child ? ` · box label <span class="awb">${esc(b.label.code)}</span>` : ''}${b && b.label && b.label.typed ? ' · typed' : ''}`
-      : 'Scan the new label: the AWB attaches to this record';
+    if (isMeasure) {
+      $('#ttl').textContent = `${multi ? `Box ${b.n}/${boxes.length} · ` : ''}Reading ${info.step}/3: ${info.title}`;
+      $('#awbline').textContent = 'Before booking: the app reads the numbers from this photo';
+    } else {
+      const step = kind === 'boxes' ? '' : `Step ${BOX_KINDS.indexOf(kind) + 1}/4 · `;
+      $('#ttl').textContent = `${multi && b && picked ? `Box ${b.n}/${boxes.length} · ` : ''}${step}Photo ${info.photo}: ${info.title}`;
+      $('#awbline').innerHTML = s.awb
+        ? `AWB <span class="awb">${esc(fmtAwb(s.awb))}</span>${b && b.label && b.label.child ? ` · box label <span class="awb">${esc(b.label.code)}</span>` : ''}${b && b.label && b.label.typed ? ' · typed' : ''}`
+        : 'Scan the new label: the AWB attaches to this record';
+    }
     $('#say').textContent = multi && kind === 'label' && !picked ? 'Which box is this label on? Tap the number printed as "Box x/y".' : info.place;
     const chips = $('#boxchips');
     chips.innerHTML = multi && kind === 'label'
@@ -461,7 +663,10 @@ async function screenCapture(sid, bid, kind) {
     };
     const bk = b && b.book, r = b && b.readings;
     const rec = $('#rec');
-    if (kind === 'label') rec.innerHTML = bk && picked ? `Booked: ${bk.length} × ${bk.breadth} × ${bk.height} cm, ${bk.weight} kg - the label should show these.` : '';
+    if (isMeasure) {
+      const done = ['weight', 'length', 'breadth', 'height'].map((f) => `${FIELD_NAMES[f]}: ${fieldLine(b, f).html}`);
+      rec.innerHTML = `<span class="small">${done.join(' · ')}</span>`;
+    } else if (kind === 'label') rec.innerHTML = bk && picked ? `Booked: ${bk.length} × ${bk.breadth} × ${bk.height} cm, ${bk.weight} kg - the label should show these.` : '';
     else if (kind === 'breadth') rec.innerHTML = `Recorded breadth <b>${esc(r.breadth)} cm</b> (booked ${bk.breadth}). If the fence now reads differently, measure again.`;
     else if (kind === 'length-height') rec.innerHTML = `Recorded length <b>${esc(r.length)} cm</b> (booked ${bk.length}) · height <b>${esc(r.height)} cm</b> (booked ${bk.height}).`;
     else if (kind === 'scale') rec.innerHTML = `Recorded weight <b>${esc(r.weight)} kg</b> (booked ${bk.weight}).`;
@@ -480,7 +685,7 @@ async function screenCapture(sid, bid, kind) {
     on('differs', remeasure);
     on('typeawb', typeAwb);
     on('wrongawb', async () => {
-      try { await R.clearAwb(s, byId); for (const x of boxes) if (x.label) { x.label = null; await db.put('boxes', x); } typed = false; hist = []; header(); toast('AWB cleared - scan the label again'); }
+      try { await R.clearAwb(s, byId); for (const x of boxes) if (x.label) await R.setLabel(x, null); typed = false; hist = []; header(); toast('AWB cleared - scan the label again'); }
       catch (e) { toast(e.message, 'bad'); }
     });
     on('take', () => capture(lastSharp, lastSteady, true));
@@ -619,7 +824,7 @@ async function screenCapture(sid, bid, kind) {
   async function frame() {
     if (busy || !video.videoWidth || !review.classList.contains('hidden')) return;
     const vw = video.videoWidth, vh = video.videoHeight, now = performance.now();
-    const zone = glareZone(kind, st.calib, vw / vh);
+    const zone = glareZone(look, st.calib, vw / vh);
     const m = measure(actx, video, vw, vh, zone, lv.glareSpot);
     const small = shrink(m.g, m.w, m.h, 4);
     const change = changeFraction(prev, small.g);
@@ -648,7 +853,7 @@ async function screenCapture(sid, bid, kind) {
     const preReady = picked && !chooser && sharpOk && lightOk && codeOk && awbOk;
     const frac = preReady ? Math.min(1, steadyMs / lv.steadyMs) : 0;
     ring.setAttribute('stroke-dasharray', `${(frac * 138).toFixed(1)} 999`);
-    drawOverlay(octx, sizeOverlay(), kind, st.calib, { barcodes: kind === 'label' ? lastBars : [], spot: m.spot, ready: preReady });
+    drawOverlay(octx, sizeOverlay(), look, st.calib, { barcodes: kind === 'label' ? lastBars : [], spot: m.spot, ready: preReady });
     const waited = (now - started) / 1000;
     const wantTake = waited > lv.forceAfterS && picked && !chooser && awbOk;
     const wantType = kind === 'label' && picked && waited > 15 && !typed && !(b && b.label) && now - lastGood > 3000;
@@ -665,13 +870,14 @@ async function screenCapture(sid, bid, kind) {
       const shot = await app.camera.takePhoto();
       if (!run.alive) return;
       busyEl.textContent = 'Checking the photo...';
-      const vw = video.videoWidth, vh = video.videoHeight, zone = glareZone(kind, st.calib, vw / vh);
+      const vw = video.videoWidth, vh = video.videoHeight, aspect = vw / vh, zone = glareZone(look, st.calib, aspect);
       const job = stillJob({
-        blob: shot.blob, zone, spotShare: lv.glareSpot,
+        blob: shot.blob, zone, spotShare: lv.glareSpot, previewAspect: aspect,
         maxLong: MAX_LONG_SIDE, maxBytes: MAX_JPEG_BYTES, minQuality: MIN_QUALITY, probeLong: kind === 'label' ? 1800 : 0,
+        read: isMeasure || recheck ? { long: READ_LONG_SIDE, quality: 0.85, crops: readCrops(kind, st.calib, aspect) } : null,
         exif: {
           make: st.phoneMake, model: st.phoneModel, software: `TFC Packing Proof ${APP_VERSION}`, dateMs: when.getTime(), uniqueId: id,
-          description: `TFC packing proof | AWB ${s.awb} | ${b ? `box ${b.n} of ${boxes.length}` : `${boxes.length} boxes`} | ${kind}`,
+          description: `TFC packing proof | AWB ${s.awb || 'not yet booked'} | ${b ? `box ${b.n} of ${boxes.length}` : `${boxes.length} boxes`} | ${kind}`,
         },
       });
       const c = await job.checked;
@@ -699,13 +905,15 @@ async function screenCapture(sid, bid, kind) {
         return;
       }
       busyEl.classList.add('hidden');
+      // Reading photo: the numbers are read now, in the background, while the team moves to the next step.
+      if (isMeasure && c.read) startMeasureRead(sid, b.id, kind, id, c.read);
       const rv = showReview(c.preview, pass);
       const res = await job.done;   // the JPEG under 2 MB, with EXIF
       if (!res.ok) throw new Error(res.error);
       const checks = {
         captured_at: isoLocal(when), pass, forced: !!forced && !pass, reasons, level: sj.need, trigger: trigger ? Math.round(trigger) : null,
         steady_ms: Math.round(steadyMs), still: c.metrics, barcode: note, size: `${res.width}x${res.height}`, quality: res.quality,
-        bytes: res.bytes, via: shot.via, src: `${c.src.w}x${c.src.h}`, encodes: res.encodes, ms: res.ms,
+        bytes: res.bytes, via: shot.via, src: `${c.src.w}x${c.src.h}`, encodes: res.encodes, ms: res.ms, preview_aspect: aspect,
         engine: kind === 'label' ? barcode.engine : undefined, camera: app.camInfo ? app.camInfo.label : '',
       };
       const p = await R.addPhoto(s, b, kind, { id, blob: res.jpeg, width: res.width, height: res.height, quality: res.quality, captured_at: checks.captured_at, checks }, byId);
@@ -713,6 +921,8 @@ async function screenCapture(sid, bid, kind) {
       beep();
       showTake = false; actions();   // e.g. "Wrong AWB?" is gone once a photo is saved
       rv.saved(p, checks);
+      // Proof photo: read it again and compare with the booking (a warning only).
+      if (recheck && c.read) startRecheck(sid, b.id, kind, p.id, c.read);
     } catch (e) {
       busyEl.classList.add('hidden');
       review.classList.add('hidden'); review.innerHTML = '';
@@ -733,8 +943,15 @@ async function screenCapture(sid, bid, kind) {
     const done = () => { clearInterval(timer); URL.revokeObjectURL(url); };
     return {
       saved(p, checks) {
-        $('#rvok').textContent = `${checks.pass ? 'Saved ✓' : 'Saved - taken anyway'} · ${p.name}`;
-        $('#rvline').textContent = checksLine(checks);
+        $('#rvok').textContent = `${checks.pass ? 'Saved ✓' : 'Saved - taken anyway'} · ${p.name || `${KIND_INFO[kind].title} (named when the label is scanned)`}`;
+        $('#rvline').textContent = checksLine(checks) + (isMeasure ? ' · reading the numbers…' : recheck ? ' · re-reading against the booking…' : '');
+        if (recheck) {
+          rereadListeners.set(p.id, (rr) => {
+            const line = $('#rvline');
+            if (!line) return;
+            line.textContent = checksLine(checks) + (rr.status !== 'done' ? ` · re-read failed: ${rr.error}` : rr.mismatch ? ` · CHECK: ${rr.mismatch}` : ' · re-read matches the booking ✓');
+          });
+        }
         const nb = $('#nextp'), rb = $('#retake');
         nb.disabled = false; rb.disabled = false;
         let n = 4;
@@ -754,6 +971,7 @@ async function screenCapture(sid, bid, kind) {
       run.alive = false;
       const d2 = await R.load(sid);
       const cur = b && d2.boxes.find((x) => x.id === b.id);
+      if (isMeasure) return go(measureNextHash(d2.s, cur));   // the next reading photo, then the box's readings
       const k = cur && BOX_KINDS.find((x) => !cur.photos[x].length);
       if (k) return go(`#/cap/${encodeURIComponent(sid)}/${encodeURIComponent(cur.id)}/${k}`);
       const nx = R.nextStep(d2.s, d2.boxes);
@@ -775,14 +993,24 @@ async function screenCapture(sid, bid, kind) {
 async function screenDone(sid) {
   const d = await R.load(sid);
   if (!d) return go('#/');
-  const { s, boxes } = d;
+  const { s, boxes, byId } = d;
+  // The proof photos were read again: anything that does not match the booking is shown before handover.
+  const rr = [];
+  for (const b of boxes) for (const k of BOX_KINDS) {
+    const p = R.finalPhoto(b.photos[k], byId);
+    if (p && p.reread) rr.push({ b, k, r: p.reread });
+  }
+  const bad = rr.filter((x) => x.r.status === 'done' && x.r.mismatch);
+  const pendingRe = boxes.some((b) => BOX_KINDS.some((k) => { const p = R.finalPhoto(b.photos[k], byId); return p && ['breadth', 'length-height', 'scale'].includes(k) && !p.reread; }));
   view(`${bar('Done')}<main>
     <div class="card go"><h3>All photos taken ✓</h3><p>Take the phone off the mount and hand the box over.</p></div>
+    ${bad.length ? `<div class="card bad"><h3>Check before handing over</h3>${bad.map((x) => `<p>${boxes.length > 1 ? `Box ${x.b.n} ` : ''}${esc(KIND_INFO[x.k].title)} photo: ${esc(x.r.mismatch)}</p>`).join('')}<p class="small">If the booking is wrong, peel the label and redo the box from the start.</p></div>`
+    : pendingRe ? '<div class="card small">Re-reading the proof photos against the booking…</div>' : rr.length ? '<div class="card go small">The proof photos read the same as the booking ✓</div>' : ''}
     <div class="card"><dl class="kv"><dt>AWB</dt><dd><span class="awb">${esc(s.awb)}</span></dd><dt>Boxes</dt><dd>${boxes.length}</dd>
       <dt>Uploaded</dt><dd id="sent">...</dd></dl></div>
     <button class="big primary" id="new">New box</button>
     <button class="wide" id="home" style="margin-top:10px">Home</button></main>`);
-  $('#new').onclick = async () => { const { b } = await R.createShipment(app.settings); go(`#/m/${encodeURIComponent(b.id)}`); };
+  $('#new').onclick = startNewBox;
   $('#home').onclick = () => go('#/');
   const run = { alive: true };
   app.cleanup = () => { run.alive = false; };
@@ -865,6 +1093,10 @@ async function screenSettings() {
       <button class="wide" id="resetlv">Reset levels</button>
     </details>
     <label class="check"><input type="checkbox" id="demo" ${st.demo ? 'checked' : ''}><span>Demo camera <span class="small muted">(computer testing only; forces TEST mode)</span></span></label>
+    ${app.harness ? `<h2>Reading the numbers (test site)</h2>
+    <label class="field">Anthropic API key for this test <span class="hint">Only on this test site, which has no backend: the key stays on this device and goes straight to Anthropic. Use a separate key with a low spending limit and delete it after the test. The real backend keeps its key in the Apps Script instead.</span>
+      <input type="password" id="aikey" value="${esc(st.testAiKey || '')}" autocomplete="off" placeholder="sk-ant-..."></label>
+    <p class="small muted">Without a key: the demo camera's drawn numbers are used, and real photos must be typed.</p>` : ''}
     <button class="big primary" id="save" style="margin-top:12px">Save</button>
     <h2>About this phone</h2>
     <dl class="kv small"><dt>App</dt><dd>v${APP_VERSION}</dd><dt>Barcode reader</dt><dd id="eng">${esc(barcode.engine)}</dd><dt>Storage</dt><dd id="stor">...</dd>
@@ -880,6 +1112,7 @@ async function screenSettings() {
       scriptUrl: $('#url').value.trim(), key: $('#key').value.trim(), station: $('#station').value.trim() || 'Station 1',
       test: $('#testmode').checked || $('#demo').checked, demo: $('#demo').checked, cameraId: $('#cam').value,
       phoneMake: $('#make').value.trim(), phoneModel: $('#model').value.trim(),
+      testAiKey: $('#aikey') ? $('#aikey').value.trim() : st.testAiKey || '',
       levels: mergeLevels({ ...st.levels, sharp, steadyMs: Number($('#steadyMs').value) || 500, brightMin: Number($('#brightMin').value) || 0,
         brightMax: Number($('#brightMax').value) || 255, glareFrame: (Number($('#glare').value) || 0) / 100, forceAfterS: Number($('#force').value) || 20 }),
     };
@@ -912,6 +1145,7 @@ async function screenSettings() {
     if (c.key.length < 8) { toast('Type the station key (8 characters or more)', 'bad'); return; }
     if (c.cameraId !== st.cameraId || c.demo !== st.demo) stopCamera();
     await saveSettings({ ...c, setupDone: true });
+    if (app.harness) app.harness.setReaderKey(c.testAiKey);
     app.uploader.retryNow();
     toast('Saved', 'go');
     go('#/');
@@ -1071,6 +1305,7 @@ async function boot() {
       const h = await import(TEST_BACKEND);
       await h.load({ persist: true });
       transport.post = h.post; app.harness = h;
+      h.setReaderKey(app.settings.testAiKey || '');
       if (!app.settings.setupDone) {
         // ?demo=1: the drawn demo camera, whose bay and scale match the default outlines. Without it (a phone test),
         // the real camera is used and the mounts are calibrated by hand.
@@ -1097,6 +1332,13 @@ async function boot() {
   window.addEventListener('hashchange', render);
   setInterval(() => app.uploader.kick(), 30000);
   prune().catch(() => {});
+  // A reading still marked "reading" from before the app was closed will never answer: offer "Read again".
+  for (const b of await db.all('boxes')) {
+    const jobs = Object.values(b.read_jobs || {}).filter((j) => j.status === 'reading');
+    if (!jobs.length) continue;
+    for (const j of jobs) { j.status = 'failed'; j.error = 'interrupted - tap Read again'; }
+    await db.put('boxes', b);
+  }
   registerSW();
   await render();
   app.uploader.kick();
