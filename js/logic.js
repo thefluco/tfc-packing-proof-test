@@ -78,7 +78,7 @@ export function sourcesLine(reads) {
 // <AWB>[-b<box>]-ours-<label|scale|length-height|breadth|boxes>-<nn>.jpg  (box only for multi-box; never for "boxes").
 // Reading photos (taken before the label) are -ours-measure-<scale|length-height|breadth>-<nn>.jpg: kept as the basis
 // of the booked numbers, and on purpose NOT matched by sync.py's dispute-photo pattern.
-export const NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length|measure-breadth|measure-height)-(\d{2})\.jpg$/;
+export const NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length|breadth|height|length-height|boxes|measure-scale|measure-length|measure-breadth|measure-height)-(\d{2})\.jpg$/;
 
 export function photoName({ awb, box, boxes, kind, nn }) {
   if (!(nn >= 1 && nn <= 99)) throw new Error('photo number out of range: ' + nn);

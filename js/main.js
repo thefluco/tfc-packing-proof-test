@@ -6,7 +6,7 @@
 // and tapes show, every photo is saved and uploaded as usual, and the numbers are read from the photos later.
 // Photos are taken automatically only when the frame is sharp, steady and well lit, re-checked on the full-size
 // still, saved on the phone first and uploaded from a queue.
-import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, KIND_INFO, BOX_KINDS, MEASURE_KINDS, FIELD_KIND, READ_LONG_SIDE, READ_MAX_BYTES, MAX_JPEG_BYTES, MAX_LONG_SIDE, MIN_QUALITY, DEMO_AWB, TEST_SITE, TEST_BACKEND } from './config.js';
+import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, KIND_INFO, BOX_KINDS, MEASURE_KINDS, FIELD_KIND, READING_ROUTINE, READ_LONG_SIDE, READ_MAX_BYTES, MAX_JPEG_BYTES, MAX_LONG_SIDE, MIN_QUALITY, DEMO_AWB, TEST_SITE, TEST_BACKEND } from './config.js';
 import * as db from './store.js';
 import * as R from './records.js';
 import { checkReading, readingWarnings, readCodes, normCode, AWB_OK, isoLocal, istDay, istParts, uuid, checksLine, bookNumbers, bookFor } from './logic.js';
@@ -213,7 +213,7 @@ async function startRecheck(sid, boxId, kind, photoId, images) {
   const r = await requestRead(app.settings, kind, images, b0 && b0.demo_truth);
   const p = await db.get('photos', photoId), b = R.upgradeBox(await db.get('boxes', boxId));
   if (!p || !b) return;
-  const fields = kind === 'scale' ? ['weight'] : kind === 'length-height' ? ['length', 'height'] : ['breadth'];
+  const fields = kind === 'scale' ? ['weight'] : kind === 'length-height' ? ['length', 'height'] : kind === 'length' || kind === 'height' ? [kind] : ['breadth'];
   if (r.code === 'no_reader') { await saveSettings({ reader: false }); p.reread = { status: 'skipped', at: isoLocal() }; }
   else if (!r.ok) p.reread = { status: 'failed', error: r.error || r.code, at: isoLocal() };
   else {
@@ -354,16 +354,18 @@ async function screenHome() {
   const r = $('#retry'); if (r) r.onclick = () => app.uploader.retryNow();
 }
 
-// ---------------------------------------------------------------- new box / another box: straight to the reading photos
+// ---------------------------------------------------------------- new box / another box: straight to the first photo
+// (v1.4: the label scan; in the before-booking reading routine: the first reading photo)
 async function startNewBox() {
   const { s, b } = await R.createShipment(app.settings);
   if (app.settings.demo) { b.demo_truth = demoTruth(); await db.put('boxes', b); }
-  go(`#/cap/${encodeURIComponent(s.id)}/${encodeURIComponent(b.id)}/measure-scale`);
+  go(`#/cap/${encodeURIComponent(s.id)}/${encodeURIComponent(b.id)}/${READING_ROUTINE ? 'measure-scale' : BOX_KINDS[0]}`);
 }
 async function addAnotherBox(s) {
   const b = await R.addBox(s);
   if (app.settings.demo) { b.demo_truth = demoTruth(); await db.put('boxes', b); }
-  go(`#/cap/${encodeURIComponent(s.id)}/${encodeURIComponent(b.id)}/measure-scale`);
+  if (READING_ROUTINE) go(`#/cap/${encodeURIComponent(s.id)}/${encodeURIComponent(b.id)}/measure-scale`);
+  else { toast(`Box ${b.n} added - ${s.boxes.length} boxes in this order`, 'go'); go(`#/s/${encodeURIComponent(s.id)}`); render(); }
 }
 function measureNextHash(s, b) {
   const k = MEASURE_KINDS.find((x) => !(b.measure[x] || []).length);
@@ -387,9 +389,9 @@ async function screenShipment(sid) {
   const { s, boxes } = d, stt = R.shipmentStatus(s, boxes), nx = R.nextStep(s, boxes), multi = boxes.length > 1;
   const kindMark = (b, k) => (b.photos[k].length ? '✓' : '·');
   const boxCard = (b) => `<div class="card"><h3>Box ${b.n}${multi ? ' of ' + boxes.length : ''} · ${esc(R.boxStatus(s, b))}</h3>
-      ${R.readingsDone(b) ? bookGrid(b) + `<div class="small muted">${measuredLine(b)}</div>` : `<p class="muted">${allLater(b) ? 'Numbers: read later from the reading photos' : measuredLine(b)}</p>`}
-      ${s.booked_at ? `<div class="small" style="margin-top:6px">Photos: label ${kindMark(b, 'label')} · breadth ${kindMark(b, 'breadth')} · length-height ${kindMark(b, 'length-height')} · weight ${kindMark(b, 'scale')}${b.label && b.label.child ? ` · box label <span class="awb">${esc(b.label.code)}</span>` : ''}</div>` : ''}
-      ${!s.booked_at && !s.cancelled_at ? `<div class="row" style="margin-top:8px"><button data-meas="${esc(b.id)}">${R.measureDone(b) ? 'Reading photos of this box' : 'Take the reading photos'}</button>${readerOff() ? '' : `<button data-edit="${esc(b.id)}">Type readings</button>`}</div>` : ''}
+      ${R.readingsDone(b) ? bookGrid(b) + `<div class="small muted">${measuredLine(b)}</div>` : `<p class="muted">${allLater(b) || !READING_ROUTINE ? 'Numbers: read later from the photos' : measuredLine(b)}</p>`}
+      ${s.booked_at ? `<div class="small" style="margin-top:6px">Photos: ${BOX_KINDS.map((k) => `${KIND_INFO[k].title.toLowerCase()} ${kindMark(b, k)}`).join(' · ')}${b.label && b.label.child ? ` · box label <span class="awb">${esc(b.label.code)}</span>` : ''}</div>` : ''}
+      ${READING_ROUTINE && !s.booked_at && !s.cancelled_at ? `<div class="row" style="margin-top:8px"><button data-meas="${esc(b.id)}">${R.measureDone(b) ? 'Reading photos of this box' : 'Take the reading photos'}</button>${readerOff() ? '' : `<button data-edit="${esc(b.id)}">Type readings</button>`}</div>` : ''}
     </div>`;
   let main = '';
   if (s.cancelled_at) main = `<div class="card bad"><b>Cancelled</b> ${esc(s.cancel_reason)}</div>`;
@@ -403,7 +405,7 @@ async function screenShipment(sid) {
       <input type="text" id="oref" value="${esc(s.order_ref)}" placeholder="TFC-001513299" autocomplete="off" ${s.cancelled_at ? 'disabled' : ''}></label></div>
     ${main}
     <h2>Boxes</h2>${boxes.map(boxCard).join('')}
-    ${!s.booked_at && !s.cancelled_at ? `<div class="row"><button id="add">+ Add another box to this order</button>${multi ? `<button id="remove">Remove box ${boxes.length}</button>` : ''}</div>` : ''}
+    ${R.canAddBox(s) ? `<div class="row"><button id="add">+ Add another box to this order</button>${multi ? `<button id="remove">Remove box ${boxes.length}</button>` : ''}</div>` : ''}
     ${!s.completed_at && !s.cancelled_at ? '<button class="danger wide" id="cancel" style="margin-top:22px">Cancel this record</button>' : ''}
   </main>`);
   const nextBtn = $('#next');
@@ -644,7 +646,7 @@ async function screenCapture(sid, bid, kind) {
   let b = bid === 'all' ? null : boxes.find((x) => x.id === bid) || null;
   // Reading photos come before booking (no label yet); proof photos after it.
   const isMeasure = kind.startsWith('measure-'), look = isMeasure ? kind.slice(8) : kind;
-  const recheck = ['breadth', 'length-height', 'scale'].includes(kind);
+  const recheck = ['scale', 'length', 'breadth', 'height', 'length-height'].includes(kind);
   if (isMeasure) {
     if (s.booked_at || !b) return go(`#/s/${encodeURIComponent(sid)}`);
   } else {
@@ -692,8 +694,10 @@ async function screenCapture(sid, bid, kind) {
       $('#ttl').textContent = `${multi ? `Box ${b.n}/${boxes.length} · ` : ''}Reading ${info.step}/${MEASURE_KINDS.length}: ${info.title}`;
       $('#awbline').textContent = 'Before booking: the numbers are read from this photo';
     } else {
-      const step = kind === 'boxes' ? '' : `Step ${BOX_KINDS.indexOf(kind) + 1}/4 · `;
-      $('#ttl').textContent = `${multi && b && picked ? `Box ${b.n}/${boxes.length} · ` : ''}${step}Photo ${info.photo}: ${info.title}`;
+      // After booking: the photos Shipmozo gets in a dispute, each showing the label (v1.4: the only round).
+      const n = BOX_KINDS.indexOf(kind) + 1, word = READING_ROUTINE ? 'Proof photo' : 'Photo';
+      const step = kind === 'boxes' || !n ? `${word}: ` : `${word} ${n}/${BOX_KINDS.length}: `;
+      $('#ttl').textContent = `${multi && b && picked ? `Box ${b.n}/${boxes.length} · ` : ''}${step}${info.title}${kind === 'label' || kind === 'boxes' ? '' : ' (with the label)'}`;
       $('#awbline').innerHTML = s.awb
         ? `AWB <span class="awb">${esc(fmtAwb(s.awb))}</span>${b && b.label && b.label.child ? ` · box label <span class="awb">${esc(b.label.code)}</span>` : ''}${b && b.label && b.label.typed ? ' · typed' : ''}`
         : 'Scan the new label: the AWB attaches to this record';
@@ -714,7 +718,7 @@ async function screenCapture(sid, bid, kind) {
       const done = ['weight', 'length', 'breadth', 'height'].map((f) => `${FIELD_NAMES[f]}: ${fieldLine(b, f).html}`);
       rec.innerHTML = `<span class="small">${done.join(' · ')}</span>`;
     } else if (kind === 'label') rec.innerHTML = bk && picked ? `Booked: ${bk.length} × ${bk.breadth} × ${bk.height} cm, ${bk.weight} kg - the label should show these.` : '';
-    else if (kind !== 'boxes' && !bk) rec.innerHTML = '<span class="small">The numbers for this box are read from its reading photos later.</span>';
+    else if (kind !== 'boxes' && !bk) rec.innerHTML = `<span class="small">${READING_ROUTINE ? 'The numbers for this box are read from its reading photos later.' : 'Keep the label and the reading both in the picture: the number is read from this photo later.'}</span>`;
     else if (kind === 'breadth') rec.innerHTML = `Recorded breadth <b>${esc(r.breadth)} cm</b> (booked ${bk.breadth}). If the fence now reads differently, measure again.`;
     else if (kind === 'length-height') rec.innerHTML = `Recorded length <b>${esc(r.length)} cm</b> (booked ${bk.length}) · height <b>${esc(r.height)} cm</b> (booked ${bk.height}).`;
     else if (kind === 'scale') rec.innerHTML = `Recorded weight <b>${esc(r.weight)} kg</b> (booked ${bk.weight}).`;
@@ -804,13 +808,14 @@ async function screenCapture(sid, bid, kind) {
 
   // -- the phone's camera app (v1.3): no live picture and no analysis loop. The photo comes back as a file and
   // goes through the same checks, naming and upload as an in-app photo; a photo that fails is shown with why.
-  let lastInput = null;
+  let lastInput = null, pickAt = 0;
   function openCamera(from) {
     if (!picked) { toast('Tap the box number printed on the label first', 'bad'); return; }
     if (busy) return;
     if (st.demo) { demoFileShot().then((f) => useFile(f, 'demo camera app')); return; }
     lastInput = from === 'gallery' ? $('#fgal') : $('#fcam');
     lastInput.value = '';
+    pickAt = Date.now();
     lastInput.click();
   }
   async function demoFileShot() {   // computer demo: a drawn photo stands in for the camera app
@@ -821,6 +826,7 @@ async function screenCapture(sid, bid, kind) {
     return new File([r.blob], 'demo.jpg', { type: 'image/jpeg', lastModified: Date.now() });
   }
   async function useFile(file, via) {
+    pickAt = 0;
     if (!file || busy) return;
     const t = file.lastModified && file.lastModified <= Date.now() + 60000 ? new Date(file.lastModified) : new Date();
     const agoMin = Math.max(0, Math.round((Date.now() - t.getTime()) / 60000));
@@ -828,11 +834,23 @@ async function screenCapture(sid, bid, kind) {
   }
   if (fileMode) {
     stopCamera();   // the camera app needs the camera to itself
+    // Back from the camera with no photo (cancelled, or Android closed this page while the camera was open):
+    // say so, instead of silently waiting.
+    const onBack = () => {
+      if (document.hidden || !pickAt) return;
+      const at = pickAt;
+      setTimeout(() => {
+        if (pickAt === at && run.alive && !busy) toast('No photo came back from the camera. Take it again, or use "Choose a photo from the gallery".', 'bad');
+      }, 3000);
+    };
+    document.addEventListener('visibilitychange', onBack);
+    const before = app.cleanup;
+    app.cleanup = () => { document.removeEventListener('visibilitychange', onBack); before(); };
     header();
     $('#snap').onclick = () => openCamera('camera');
     $('#gallery').onclick = () => openCamera('gallery');
-    $('#fcam').onchange = () => useFile($('#fcam').files[0], 'camera app');
-    $('#fgal').onchange = () => useFile($('#fgal').files[0], 'gallery');
+    $('#fcam').onchange = (ev) => useFile(ev.target.files[0], 'camera app');
+    $('#fgal').onchange = (ev) => useFile(ev.target.files[0], 'gallery');
     if (kind === 'label') barcode.getDetector().catch((e) => toast('Barcode reader failed to load: ' + e.message, 'bad'));
     return;
   }
@@ -984,8 +1002,10 @@ async function screenCapture(sid, bid, kind) {
     busyEl.textContent = given ? 'Checking the photo...' : 'Taking photo...'; busyEl.classList.remove('hidden');
     const when = given ? given.when : new Date(), id = uuid();
     try {
-      // Reading photos at the camera's full resolution; proof photos at about 4,000 px (they are cut to 2 MB).
-      const shot = given || await app.camera.takePhoto({ full: isMeasure });
+      // Photos the numbers are read from keep the camera's full resolution (v1.4: every photo); in the reading
+      // routine the proof photos are cut to 2 MB at about 4,000 px.
+      const keepFull = isMeasure || !READING_ROUTINE;
+      const shot = given || await app.camera.takePhoto({ full: keepFull });
       if (!run.alive) return;
       busyEl.textContent = 'Checking the photo...';
       // Outlines, glare zones and close-ups come from the calibrated mounts: only for the in-app camera.
@@ -994,8 +1014,8 @@ async function screenCapture(sid, bid, kind) {
       readingNow = !readerOff() && (isMeasure || (recheck && !!(b && b.book)));
       const job = stillJob({
         blob: shot.blob, zone, spotShare: lv.glareSpot, previewAspect: aspect,
-        maxLong: isMeasure ? 20000 : MAX_LONG_SIDE, maxBytes: isMeasure ? READ_MAX_BYTES : MAX_JPEG_BYTES, minQuality: MIN_QUALITY,
-        keepOriginal: isMeasure ? READ_MAX_BYTES : 0, probeLong: kind === 'label' ? (given ? 2400 : 1800) : 0,
+        maxLong: keepFull ? 20000 : MAX_LONG_SIDE, maxBytes: keepFull ? READ_MAX_BYTES : MAX_JPEG_BYTES, minQuality: MIN_QUALITY,
+        keepOriginal: keepFull ? READ_MAX_BYTES : 0, probeLong: kind === 'label' ? (given ? 2400 : 1800) : 0,
         read: readingNow ? { long: READ_LONG_SIDE, quality: 0.85, crops: given ? [] : readCrops(kind, st.calib, aspect) } : null,
         exif: {
           make: st.phoneMake, model: st.phoneModel, software: `TFC Packing Proof ${APP_VERSION}`, dateMs: when.getTime(), uniqueId: id,
@@ -1140,7 +1160,7 @@ async function screenDone(sid) {
     <div class="card go"><h3>All photos taken ✓</h3><p>Take the phone off the mount and hand the box over.</p></div>
     ${bad.length ? `<div class="card bad"><h3>Check before handing over</h3>${bad.map((x) => `<p>${boxes.length > 1 ? `Box ${x.b.n} ` : ''}${esc(KIND_INFO[x.k].title)} photo: ${esc(x.r.mismatch)}</p>`).join('')}<p class="small">If the booking is wrong, peel the label and redo the box from the start.</p></div>`
     : pendingRe ? '<div class="card small">Re-reading the proof photos against the booking…</div>' : rr.some((x) => x.r.status === 'done') ? '<div class="card go small">The proof photos read the same as the booking ✓</div>' : ''}
-    ${later.length ? `<div class="card small">${boxes.length > 1 ? `Box ${later.map((b) => b.n).join(', ')}: n` : 'N'}umbers to be read from the reading photos later (they are saved with the proof photos).</div>` : ''}
+    ${later.length ? `<div class="card small">${boxes.length > 1 ? `Box ${later.map((b) => b.n).join(', ')}: n` : 'N'}umbers to be read from ${READING_ROUTINE ? 'the reading photos' : 'these photos'} later.</div>` : ''}
     <div class="card"><dl class="kv"><dt>AWB</dt><dd><span class="awb">${esc(s.awb)}</span></dd><dt>Boxes</dt><dd>${boxes.length}</dd>
       <dt>Uploaded</dt><dd id="sent">...</dd></dl></div>
     <button class="big primary" id="new">New box</button>
@@ -1221,7 +1241,7 @@ async function screenSettings() {
     <p class="small muted">Calibrated: bay ${st.calib.bay ? '✓' : 'no'} · scale ${st.calib.scale ? '✓' : 'no'}. The calibration screen also shows the live sharpness and light numbers.</p>
     <details><summary>Check levels (advanced)</summary>
       <p class="small muted">Sharpness is the frame-trial score (edge variance on a 540x960 grey copy). Set each level a little below what a good photo scores at the station.</p>
-      <div class="row">${['label', 'breadth', 'length-height', 'scale', 'boxes'].map(lvl).join('')}</div>
+      <div class="row">${['label', 'scale', 'length', 'breadth', 'height', 'boxes'].map(lvl).join('')}</div>
       <div class="row"><label class="field">Steady (ms)<input type="number" id="steadyMs" value="${lv.steadyMs}" step="100"></label>
         <label class="field">Dark below<input type="number" id="brightMin" value="${lv.brightMin}"></label>
         <label class="field">Bright above<input type="number" id="brightMax" value="${lv.brightMax}"></label></div>
@@ -1473,7 +1493,9 @@ async function boot() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopCamera(); return; }
     const r = parts()[0];
-    if (r === 'cap' || r === 'calib') render();
+    // Only the in-app camera needs its picture restarted. With the phone's camera app the page is hidden while the
+    // photo is taken: redrawing then would throw away the screen that is waiting for that photo.
+    if ((r === 'cap' && app.settings.cameraMode === 'live') || r === 'calib') render();
     app.uploader.kick();
   });
   window.addEventListener('hashchange', render);

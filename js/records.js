@@ -1,9 +1,9 @@
-// Box records: one shipment (order) holds one or more boxes; each box holds its reading photos and the numbers
-// read from them (or typed), the numbers to book, the label scan and its proof photos. The Sheet gets one row per
-// box (rowSnapshot).
+// Box records: one shipment (order) holds one or more boxes; each box holds the label scan and its photos (v1.4:
+// weight, length, breadth, height, each with the label), and - in the before-booking reading routine, now off - its
+// reading photos and the numbers read from them. The Sheet gets one row per box (rowSnapshot).
 import * as db from './store.js';
 import { newId, bookNumbers, checkReading, isoLocal, istMonth, checksLine, photoName, sourcesLine } from './logic.js';
-import { BOX_KINDS, MEASURE_KINDS, MEASURE_FIELD } from './config.js';
+import { BOX_KINDS, MEASURE_KINDS, MEASURE_FIELD, READING_ROUTINE } from './config.js';
 
 const FIELDS = ['weight', 'length', 'height', 'breadth'];
 
@@ -15,7 +15,7 @@ function newBox(s, n) {
     read_jobs: {},    // per reading photo kind: {status:'reading'|'done'|'partial'|'failed'|'later', error, notes, flags, missing, at}
                       // 'later': no reader (no API key) - the numbers are read from the photo afterwards
     measure: Object.fromEntries(MEASURE_KINDS.map((k) => [k, []])),
-    label: null, photos: { 'label': [], 'breadth': [], 'length-height': [], 'scale': [] },
+    label: null, photos: Object.fromEntries([...BOX_KINDS, 'length-height'].map((k) => [k, []])),
     remeasures: [], completed_at: null,
   };
 }
@@ -45,14 +45,18 @@ export function upgradeBox(b) {
   b.read_jobs = b.read_jobs || {};
   b.measure = b.measure || {};
   for (const k of MEASURE_KINDS) b.measure[k] = b.measure[k] || [];
+  b.photos = b.photos || {};
+  for (const k of [...BOX_KINDS, 'length-height']) b.photos[k] = b.photos[k] || [];
   return b;
 }
 
+// v1.4: the box was booked before the app (READING_ROUTINE off), so a record starts as booked.
 export async function createShipment(settings) {
+  const now = isoLocal();
   const s = {
-    id: newId('S'), created_at: isoLocal(), station: settings.station || 'Station 1', test: !!settings.test,
+    id: newId('S'), created_at: now, station: settings.station || 'Station 1', test: !!settings.test,
     order_ref: '', awb: null, awb_source: null, awb_at: null, month: null,
-    boxes: [], booked_at: null, boxes_photo: [], completed_at: null, cancelled_at: null, cancel_reason: '',
+    boxes: [], booked_at: READING_ROUTINE ? null : now, boxes_photo: [], completed_at: null, cancelled_at: null, cancel_reason: '',
   };
   const b = newBox(s, 1);
   s.boxes.push(b.id);
@@ -60,8 +64,12 @@ export async function createShipment(settings) {
   return { s, b };
 }
 
+// Boxes can be added until the photos are named: before booking (reading routine) or, v1.4, before the label scan
+// attaches the AWB (a multi-box name carries "-b<box>", so the box count must be final by then).
+export function canAddBox(s) { return !s.cancelled_at && (READING_ROUTINE ? !s.booked_at : !s.awb); }
+
 export async function addBox(s) {
-  if (s.booked_at) throw new Error('This order is already booked. Start a new record for another box.');
+  if (!canAddBox(s)) throw new Error('The label is already scanned for this order. Start a new record for another box.');
   const b = newBox(s, s.boxes.length + 1);
   s.boxes.push(b.id);
   await db.putMany([['shipments', s], ['boxes', b]]);
@@ -69,7 +77,7 @@ export async function addBox(s) {
 }
 
 export async function removeLastBox(s) {
-  if (s.booked_at || s.boxes.length < 2) return;
+  if (!canAddBox(s) || s.boxes.length < 2) return;
   const id = s.boxes.pop();
   await db.put('shipments', s);
   await db.del('boxes', id);
@@ -154,7 +162,7 @@ export function boxStatus(s, b) {
     return !readingsDone(b) && readFailed(b) ? 'check readings' : 'to book';
   }
   if (boxDone(b)) return 'complete';
-  return `photos ${photosTaken(b)}/4`;
+  return `photos ${photosTaken(b)}/${BOX_KINDS.length}`;
 }
 
 export function shipmentDone(s, boxes) {
@@ -175,7 +183,7 @@ export function shipmentStatus(s, boxes) {
 // What comes next for this order: {screen, box, kind}
 export function nextStep(s, boxes) {
   if (s.cancelled_at) return { screen: 'done' };
-  for (const b of boxes) {
+  for (const b of READING_ROUTINE ? boxes : []) {   // v1.4: no reading photos before booking
     if (readingsDone(b)) continue;
     const k = MEASURE_KINDS.find((x) => !(b.measure[x] || []).length);
     if (k) return { screen: 'capture', box: b, kind: k };
@@ -289,7 +297,7 @@ export async function queueRows(s, boxes) {
 export function rowSnapshot(s, b, byId) {
   upgradeBox(b);
   const photos = {};
-  for (const k of [...MEASURE_KINDS, ...BOX_KINDS, 'boxes']) {
+  for (const k of [...MEASURE_KINDS, ...BOX_KINDS, 'length-height', 'boxes']) {
     const ids = k === 'boxes' ? (s.boxes.length > 1 ? s.boxes_photo : []) : listFor(s, b, k);
     const list = ids.map((id) => byId[id]).filter((p) => p && p.name);
     const fin = list[list.length - 1];

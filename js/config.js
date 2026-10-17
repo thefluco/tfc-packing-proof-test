@@ -1,7 +1,7 @@
 // TFC Packing Proof - settings that are safe to publish.
 // The station key is NOT here and must never be: it is typed once on the phone (Settings).
 
-export const APP_VERSION = '1.3.0';
+export const APP_VERSION = '1.4.0';
 
 // The Apps Script web-app URL (.../exec). Not a secret: the script refuses anything without the station key.
 // Fill it in before uploading to GitHub Pages, or paste it in Settings on the phone (Settings wins).
@@ -11,8 +11,9 @@ export const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzGZB
 export const MAX_JPEG_BYTES = 1990000;
 export const MAX_LONG_SIDE = 4000;      // SOP: about 3,000 to 4,000 px on the long side
 export const MIN_QUALITY = 0.80;        // below this the photo shrinks instead of losing more quality
-// READING photos never go to Shipmozo: kept at the camera's full resolution. A camera JPEG up to this size is
-// kept exactly as the camera made it (with the camera's own EXIF); a bigger one is re-saved to fit.
+// Photos the numbers are read from are kept at the camera's full resolution: a camera JPEG up to this size is kept
+// exactly as the camera made it (with the camera's own EXIF); a bigger one is re-saved to fit. v1.4: that is every
+// photo (they are also the dispute photos) - the Shipmozo agent makes its own copies under 2 MB when it uploads.
 export const READ_MAX_BYTES = 6000000;
 
 // Image-first (v1.1): before the label, READING photos per box; the numbers to book are read from them -
@@ -21,10 +22,14 @@ export const READ_MAX_BYTES = 6000000;
 export const MEASURE_KINDS = ['measure-scale', 'measure-length', 'measure-breadth', 'measure-height'];
 export const MEASURE_FIELD = { 'measure-scale': 'weight', 'measure-length': 'length', 'measure-breadth': 'breadth', 'measure-height': 'height' };
 export const FIELD_KIND = { weight: 'measure-scale', length: 'measure-length', breadth: 'measure-breadth', height: 'measure-height' };
-// After booking and labelling, the PROOF photos per box (SOP steps 7-9): label (photo 1), breadth (photo 4),
-// length-height (photo 3), weight (photo 2). Every proof photo shows the label.
-export const BOX_KINDS = ['label', 'breadth', 'length-height', 'scale'];
-export const ALL_KINDS = ['label', 'scale', 'length-height', 'breadth', 'boxes'];
+// v1.4 (owner, 17 Oct): ONE round of photos, AFTER booking. The box is booked elsewhere with what the scale and
+// tape show and already has its label; the app scans the label (AWB) and takes four photos, each showing the label
+// and one reading. Those are the dispute photos and the numbers are read from them later. The reading photos
+// before booking (MEASURE_KINDS, v1.1-1.3) are switched off: they belong to a separate before-booking tool.
+export const READING_ROUTINE = false;
+// The photos per box, in order: the label scan, then weight, length, breadth, height (each with the label).
+export const BOX_KINDS = ['label', 'scale', 'length', 'breadth', 'height'];
+export const ALL_KINDS = ['label', 'scale', 'length', 'breadth', 'height', 'length-height', 'boxes'];
 export const READ_LONG_SIDE = 2576;   // the reader's largest useful image size
 
 export const KIND_INFO = {
@@ -50,23 +55,33 @@ export const KIND_INFO = {
   },
   'label': {
     photo: 1, title: 'Label', mount: null,
-    place: 'Hold the phone about 25 cm above the new label.',
-    shows: 'The whole label readable: AWB, barcode, order number, Box x/y, with some of the box around it.',
-  },
-  'breadth': {
-    photo: 4, title: 'Breadth', mount: 'bay',
-    place: 'Snap the phone onto the BAY mount. Keep the low fence where it is.',
-    shows: 'The low fence touching the widest bulge, its readings on B1 and B2, and the label.',
-  },
-  'length-height': {
-    photo: 3, title: 'Length and height', mount: 'bay',
-    place: 'Swap the fence for the end panel and the gauge. Phone stays on the BAY mount.',
-    shows: 'The left wall, the end panel at the far end and its reading on scale L, the gauge arm on the highest point and its reading, and the label.',
+    place: 'The booked label stuck on the box. Hold the phone about 25 cm above it. (Several boxes in this order? Close this and tap "+ Add another box" first.)',
+    shows: 'The whole label readable: AWB, barcode, order number, Box x/y, with some of the box around it. The AWB is read from its barcode.',
   },
   'scale': {
     photo: 2, title: 'Weight', mount: 'scale',
-    place: 'Put the box back on the scale. Snap the phone onto the SCALE mount.',
-    shows: 'The box resting only on the platform, both ends clear of the floor, the settled reading, and the label.',
+    place: 'Box on the scale, resting only on the platform with both ends clear of the floor. Wait until the number stops changing.',
+    shows: 'The settled weight on the display AND the label on the box, both sharp. Get as close as you can with both in the picture. The weight is read from this photo.',
+  },
+  'length': {
+    photo: 3, title: 'Length', mount: null,
+    place: 'Tape along the longest side at its longest point, zero held exactly at one end (a flat board against a round or soft end).',
+    shows: 'The label and the tape where it meets the OTHER end, the cm number there sharp. Tap the tape reading to focus. The length is read from this photo.',
+  },
+  'breadth': {
+    photo: 4, title: 'Breadth', mount: null,
+    place: 'Tape across the box at its widest point, zero exactly at one side (a flat board against a bulge helps).',
+    shows: 'The label and the tape where it meets the other side, the cm number there sharp. Tap the tape reading to focus. The breadth is read from this photo.',
+  },
+  'height': {
+    photo: 5, title: 'Height', mount: null,
+    place: 'Box on a flat surface, tape standing upright beside it with zero on the surface, a flat board across the highest point touching the tape.',
+    shows: 'The label and the tape where the board meets it, the cm number there sharp. Tap the tape reading to focus. The height is read from this photo.',
+  },
+  'length-height': {   // the measuring station's combined photo (v1.0-1.3); kept so older records still show
+    photo: 3, title: 'Length and height', mount: 'bay',
+    place: 'Swap the fence for the end panel and the gauge. Phone stays on the BAY mount.',
+    shows: 'The left wall, the end panel at the far end and its reading on scale L, the gauge arm on the highest point and its reading, and the label.',
   },
   'boxes': {
     photo: 5, title: 'All boxes', mount: null,
@@ -79,7 +94,7 @@ export const KIND_INFO = {
 // Sharpness uses the same score as the 15 Oct frame trial: variance of an edge map on a 540x960 grey copy.
 export const DEFAULT_LEVELS = {
   sharp: {
-    'label': 300, 'breadth': 150, 'length-height': 150, 'scale': 120, 'boxes': 120,
+    'label': 300, 'breadth': 150, 'length-height': 150, 'scale': 120, 'boxes': 120, 'length': 150, 'height': 150,
     'measure-scale': 120, 'measure-length': 150, 'measure-breadth': 150, 'measure-height': 150,
   },
   peakRatio: 0.85,        // a frame must be at least this share of the sharpest frame in the last 3 s
