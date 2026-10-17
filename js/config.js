@@ -1,21 +1,26 @@
 // TFC Packing Proof - settings that are safe to publish.
 // The station key is NOT here and must never be: it is typed once on the phone (Settings).
 
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.3.0';
 
 // The Apps Script web-app URL (.../exec). Not a secret: the script refuses anything without the station key.
 // Fill it in before uploading to GitHub Pages, or paste it in Settings on the phone (Settings wins).
-export const DEFAULT_SCRIPT_URL = '';
+export const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzGZBe_9-SrDzbniZrZ2Afjspl8IZpLGvm-Fxr9gXqBM-wiFeV8H5-0JLWWrxXCl3eX/exec';
 
-// Shipmozo takes at most 4 images of 2 MB each. Stay a little under 2,000,000 bytes.
+// PROOF photos: Shipmozo takes at most 4 images of 2 MB each. Stay a little under 2,000,000 bytes.
 export const MAX_JPEG_BYTES = 1990000;
 export const MAX_LONG_SIDE = 4000;      // SOP: about 3,000 to 4,000 px on the long side
 export const MIN_QUALITY = 0.80;        // below this the photo shrinks instead of losing more quality
+// READING photos never go to Shipmozo: kept at the camera's full resolution. A camera JPEG up to this size is
+// kept exactly as the camera made it (with the camera's own EXIF); a bigger one is re-saved to fit.
+export const READ_MAX_BYTES = 6000000;
 
-// Image-first (v1.1): before the label, three READING photos per box; the numbers to book are read from them -
+// Image-first (v1.1): before the label, READING photos per box; the numbers to book are read from them -
 // in the app when the backend has a reader (API key), otherwise later from the saved photos (v1.2).
-// Order follows the SOP: weigh, length and height in the bay, then breadth at the fence.
-export const MEASURE_KINDS = ['measure-scale', 'measure-length-height', 'measure-breadth'];
+// v1.3: four close-ups, one number each (a tape measure until the measuring station exists).
+export const MEASURE_KINDS = ['measure-scale', 'measure-length', 'measure-breadth', 'measure-height'];
+export const MEASURE_FIELD = { 'measure-scale': 'weight', 'measure-length': 'length', 'measure-breadth': 'breadth', 'measure-height': 'height' };
+export const FIELD_KIND = { weight: 'measure-scale', length: 'measure-length', breadth: 'measure-breadth', height: 'measure-height' };
 // After booking and labelling, the PROOF photos per box (SOP steps 7-9): label (photo 1), breadth (photo 4),
 // length-height (photo 3), weight (photo 2). Every proof photo shows the label.
 export const BOX_KINDS = ['label', 'breadth', 'length-height', 'scale'];
@@ -25,18 +30,23 @@ export const READ_LONG_SIDE = 2576;   // the reader's largest useful image size
 export const KIND_INFO = {
   'measure-scale': {
     photo: 'R1', title: 'Weight reading', mount: 'scale', step: 1,
-    place: 'Put the box on the scale, resting only on the platform with both ends clear of the floor. Phone on the SCALE mount.',
-    shows: 'The settled reading on the display and the whole box on the platform. The weight is read from this photo.',
+    place: 'Put the box on the scale, resting only on the platform with both ends clear of the floor. Wait until the number stops changing.',
+    shows: 'Close to the display: the settled weight large and sharp, with the box on the platform in the picture. The weight is read from this photo.',
   },
-  'measure-length-height': {
-    photo: 'R2', title: 'Length and height reading', mount: 'bay', step: 2,
-    place: 'Box in the back-left corner. End panel against the far end, gauge arm on the highest point. Phone on the BAY mount.',
-    shows: 'The end panel on scale L and the gauge arm on its scale. Length and height are read from this photo.',
+  'measure-length': {
+    photo: 'R2', title: 'Length reading', mount: null, step: 2,
+    place: 'Tape along the longest side, at its longest point. Hold the tape\'s zero exactly at one end (press a flat board against the end if it is round or soft).',
+    shows: 'A close-up where the tape meets the OTHER end of the box: the cm number and the marks around it sharp and readable. The length is read from this photo.',
   },
   'measure-breadth': {
-    photo: 'R3', title: 'Breadth reading', mount: 'bay', step: 3,
-    place: 'Lift the panel and gauge away. Slide the low fence against the widest bulge until B1 and B2 read the same.',
-    shows: 'The fence on scales B1 and B2. The breadth is read from this photo.',
+    photo: 'R3', title: 'Breadth reading', mount: null, step: 3,
+    place: 'Tape across the box at its widest point. Zero exactly at one side (a flat board against a bulge helps).',
+    shows: 'A close-up where the tape meets the other side: the cm number and the marks around it sharp and readable. The breadth is read from this photo.',
+  },
+  'measure-height': {
+    photo: 'R4', title: 'Height reading', mount: null, step: 4,
+    place: 'Box on a flat surface. Tape standing upright beside it, zero on the surface. Lay a flat board across the highest point of the box so it touches the tape.',
+    shows: 'A close-up where the board (or the top of the box) meets the tape: the cm number and the marks around it sharp and readable. The height is read from this photo.',
   },
   'label': {
     photo: 1, title: 'Label', mount: null,
@@ -70,7 +80,7 @@ export const KIND_INFO = {
 export const DEFAULT_LEVELS = {
   sharp: {
     'label': 300, 'breadth': 150, 'length-height': 150, 'scale': 120, 'boxes': 120,
-    'measure-scale': 120, 'measure-length-height': 150, 'measure-breadth': 150,
+    'measure-scale': 120, 'measure-length': 150, 'measure-breadth': 150, 'measure-height': 150,
   },
   peakRatio: 0.85,        // a frame must be at least this share of the sharpest frame in the last 3 s
   stillRatio: 0.70,       // the full-size still must keep at least this share of the trigger frame's score
@@ -91,5 +101,5 @@ export const DEMO_AWB = '99001610201601';   // demo camera only (desktop testing
 
 // Test backend: Code.gs run in the browser on a fake Drive and Sheet (nothing reaches Google).
 // In the workspace it is used only with ?harness=1. tests/make_test_site.py builds a TEST site where it is always on.
-export const TEST_SITE = true;
-export const TEST_BACKEND = '../test-backend/gas-harness.js';   // relative to js/main.js
+export const TEST_SITE = false;
+export const TEST_BACKEND = '../../tests/gas-harness.js';   // relative to js/main.js

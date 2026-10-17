@@ -110,10 +110,27 @@ self.onmessage = async (ev) => {
       metrics: { sharp: m.sharp, bright: m.bright, glare: m.glare, spot: m.spot, worst: m.worst, hiSharp }, ms: Math.round(performance.now() - t0),
     }, probe ? [probe] : []);
 
+    // Reading photos: a camera JPEG that already fits is kept exactly as the camera made it (full resolution,
+    // the camera's own EXIF with its capture time and phone model).
+    if (job.keepOriginal && job.blob.type === 'image/jpeg' && job.blob.size <= job.keepOriginal) {
+      if (cancelled.has(job.id)) throw new Error('cancelled');
+      self.postMessage({
+        id: job.id, phase: 'done', ok: true, jpeg: job.blob, width: srcW, height: srcH, quality: 'original', bytes: job.blob.size, encodes: 0,
+        ms: Math.round(performance.now() - t0),
+      });
+      return;
+    }
     const ex = job.exif;
     const exifFor = (w, h) => buildExif({ ...ex, date: new Date(ex.dateMs), width: w, height: h });
     const budget = job.maxBytes - exifFor(0, 0).length;
-    const fit = await fitJpeg(bitmap, job.maxLong, budget, job.minQuality, () => cancelled.has(job.id));
+    let fit;
+    try {
+      fit = await fitJpeg(bitmap, job.maxLong, budget, job.minQuality, () => cancelled.has(job.id));
+    } catch (err) {
+      // A very large photo can run the phone out of memory while encoding: try again at 6,000 px.
+      if (cancelled.has(job.id) || Math.max(srcW, srcH) <= 6000) throw err;
+      fit = await fitJpeg(bitmap, 6000, budget, job.minQuality, () => cancelled.has(job.id));
+    }
     const bytes = insertExif(new Uint8Array(await fit.blob.arrayBuffer()), exifFor(fit.w, fit.h));
     const jpeg = new Blob([bytes], { type: 'image/jpeg' });
     self.postMessage({

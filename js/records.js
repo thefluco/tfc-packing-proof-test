@@ -3,7 +3,7 @@
 // box (rowSnapshot).
 import * as db from './store.js';
 import { newId, bookNumbers, checkReading, isoLocal, istMonth, checksLine, photoName, sourcesLine } from './logic.js';
-import { BOX_KINDS, MEASURE_KINDS } from './config.js';
+import { BOX_KINDS, MEASURE_KINDS, MEASURE_FIELD } from './config.js';
 
 const FIELDS = ['weight', 'length', 'height', 'breadth'];
 
@@ -14,7 +14,7 @@ function newBox(s, n) {
     reads: {},        // per field: {source:'read'|'typed', value, confidence, photo_id, at, read_value}
     read_jobs: {},    // per reading photo kind: {status:'reading'|'done'|'partial'|'failed'|'later', error, notes, flags, missing, at}
                       // 'later': no reader (no API key) - the numbers are read from the photo afterwards
-    measure: { 'measure-scale': [], 'measure-length-height': [], 'measure-breadth': [] },
+    measure: Object.fromEntries(MEASURE_KINDS.map((k) => [k, []])),
     label: null, photos: { 'label': [], 'breadth': [], 'length-height': [], 'scale': [] },
     remeasures: [], completed_at: null,
   };
@@ -38,12 +38,13 @@ export function updateBox(id, mutate) {
   });
 }
 
-// Boxes created before v1.1 have no reading-photo lists.
+// Boxes created before v1.1 have no reading-photo lists; before v1.3, no separate length and height lists.
 export function upgradeBox(b) {
   if (!b) return b;
   b.reads = b.reads || {};
   b.read_jobs = b.read_jobs || {};
-  b.measure = b.measure || { 'measure-scale': [], 'measure-length-height': [], 'measure-breadth': [] };
+  b.measure = b.measure || {};
+  for (const k of MEASURE_KINDS) b.measure[k] = b.measure[k] || [];
   return b;
 }
 
@@ -108,7 +109,7 @@ export function applyRead(b, kind, photoId, r) {
   const job = { status: r.ok ? 'done' : later ? 'later' : 'failed', error: r.ok || later ? '' : r.error || r.code || 'failed', code: r.ok ? '' : r.code || '',
     notes: r.notes || '', flags: r.flags || {}, at: isoLocal(), photo_id: photoId, missing: [] };
   if (r.ok) {
-    const want = kind === 'measure-scale' ? ['weight'] : kind === 'measure-length-height' ? ['length', 'height'] : ['breadth'];
+    const want = MEASURE_FIELD[kind] ? [MEASURE_FIELD[kind]] : kind === 'measure-length-height' ? ['length', 'height'] : ['breadth'];
     for (const f of want) {
       const v = r.values[f];
       if (!v || checkReading(f, v)) { job.missing.push(f); continue; }

@@ -15,6 +15,7 @@ const fits = (c, aspect) => !!(c && c.pts && Math.abs(c.aspect - aspect) / aspec
 // Close-ups of the printed scales, from the calibrated mount outline (normalised preview coordinates).
 // Without a calibration the reader gets the whole photo only.
 export function readCrops(kind, calib, aspect) {
+  if (/^measure-(length|breadth|height)$/.test(kind)) return [];   // v1.3 tape close-ups: the whole photo is the close-up
   const base = kind.replace(/^measure-/, '');
   calib = calib || {};
   if ((base === 'length-height' || base === 'breadth') && fits(calib.bay, aspect)) {

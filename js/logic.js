@@ -78,7 +78,7 @@ export function sourcesLine(reads) {
 // <AWB>[-b<box>]-ours-<label|scale|length-height|breadth|boxes>-<nn>.jpg  (box only for multi-box; never for "boxes").
 // Reading photos (taken before the label) are -ours-measure-<scale|length-height|breadth>-<nn>.jpg: kept as the basis
 // of the booked numbers, and on purpose NOT matched by sync.py's dispute-photo pattern.
-export const NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length-height|measure-breadth)-(\d{2})\.jpg$/;
+export const NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length|measure-breadth|measure-height)-(\d{2})\.jpg$/;
 
 export function photoName({ awb, box, boxes, kind, nn }) {
   if (!(nn >= 1 && nn <= 99)) throw new Error('photo number out of range: ' + nn);
@@ -158,7 +158,8 @@ export function checksLine(c) {
   if (s.bright != null) parts.push(`light ${Math.round(s.bright)}`);
   if (s.glare != null) parts.push(`glare ${(s.glare * 100).toFixed(1)}%` + (s.spot ? ' SPOT' : ''));
   if (c.barcode) parts.push(c.barcode);
-  if (c.size) parts.push(`${c.size} px q${c.quality} ${Math.round((c.bytes || 0) / 1024)} KB`);
-  if (c.via && c.via !== 'imagecapture') parts.push('still from ' + c.via);
+  if (c.size) parts.push(`${c.size} px ${c.quality === 'original' ? 'as the camera saved it' : 'q' + c.quality} ${Math.round((c.bytes || 0) / 1024)} KB`);
+  if (c.via) parts.push(`from ${c.via === 'imagecapture' ? 'in-app camera' : c.via}${c.src && c.src !== c.size ? ` (camera ${c.src})` : ''}`);
+  if (c.taken_ago_min) parts.push(`taken ${c.taken_ago_min} min before it was added`);
   return parts.join(' · ');
 }

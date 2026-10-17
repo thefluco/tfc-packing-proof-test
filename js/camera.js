@@ -1,5 +1,6 @@
 // The phone camera: live preview for the checks, full-size stills from ImageCapture.takePhoto().
-// Preview frames are only about 1080p; the still is the camera's own photo (about 12 MP on a 50 MP phone).
+// Preview frames are only about 1080p; the still is the camera's own photo (the most Chrome is offered - often
+// about 12 MP even on a 50 MP phone; the phone's own camera app can do more, see the camera-app mode in main.js).
 
 function waitForSize(video) {
   if (video.videoWidth) return Promise.resolve();
@@ -71,16 +72,17 @@ export class Camera {
   get live() { return !!(this.track && this.track.readyState === 'live'); }
 
   // { blob, via } - via 'imagecapture' for a real still, 'video frame' when the browser cannot take one.
-  async takePhoto() {
+  // full: the largest still the camera offers to Chrome (reading photos); otherwise about 4,000 px (proof photos).
+  async takePhoto({ full = false } = {}) {
     if (this.ic) {
       try {
         const pc = this.photoCaps || {}, settings = {};
         if ((pc.fillLightMode || []).includes('off')) settings.fillLightMode = 'off';   // SOP: no flash
         if (pc.imageWidth && pc.imageWidth.max) {
-          // About 4,000 px on the long side, 4:3 (the sensor's own shape); never more than the camera offers.
-          const w = Math.min(pc.imageWidth.max, 4080);
+          // 4:3 (the sensor's own shape); never more than the camera offers.
+          const w = full ? pc.imageWidth.max : Math.min(pc.imageWidth.max, 4080);
           settings.imageWidth = w;
-          settings.imageHeight = Math.min(pc.imageHeight.max, Math.round((w * 3) / 4));
+          settings.imageHeight = full ? pc.imageHeight.max : Math.min(pc.imageHeight.max, Math.round((w * 3) / 4));
         }
         const blob = await this.ic.takePhoto(settings);
         if (blob && blob.size > 0) return { blob, via: 'imagecapture' };

@@ -6,7 +6,7 @@
 // and tapes show, every photo is saved and uploaded as usual, and the numbers are read from the photos later.
 // Photos are taken automatically only when the frame is sharp, steady and well lit, re-checked on the full-size
 // still, saved on the phone first and uploaded from a queue.
-import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, KIND_INFO, BOX_KINDS, MEASURE_KINDS, READ_LONG_SIDE, MAX_JPEG_BYTES, MAX_LONG_SIDE, MIN_QUALITY, DEMO_AWB, TEST_SITE, TEST_BACKEND } from './config.js';
+import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, KIND_INFO, BOX_KINDS, MEASURE_KINDS, FIELD_KIND, READ_LONG_SIDE, READ_MAX_BYTES, MAX_JPEG_BYTES, MAX_LONG_SIDE, MIN_QUALITY, DEMO_AWB, TEST_SITE, TEST_BACKEND } from './config.js';
 import * as db from './store.js';
 import * as R from './records.js';
 import { checkReading, readingWarnings, readCodes, normCode, AWB_OK, isoLocal, istDay, istParts, uuid, checksLine, bookNumbers, bookFor } from './logic.js';
@@ -60,14 +60,17 @@ function beep() {
 // ---------------------------------------------------------------- settings
 const DEFAULTS = {
   scriptUrl: DEFAULT_SCRIPT_URL, key: '', station: 'Station 1', test: true, demo: false, cameraId: '',
+  cameraMode: 'app',   // v1.3: 'app' = the phone's own camera app; 'live' = the in-app camera that shoots by itself
   phoneMake: '', phoneModel: '', levels: DEFAULT_LEVELS, calib: {}, setupDone: false,
 };
+const HARNESS_URL = 'http://localhost/demo-backend';   // the in-browser test backend's stand-in address
 const mergeLevels = (l = {}) => ({ ...DEFAULT_LEVELS, ...l, sharp: { ...DEFAULT_LEVELS.sharp, ...(l.sharp || {}) } });
 
 async function loadSettings() {
   const s = await db.getKV('settings', {});
   const out = { ...DEFAULTS, ...s, levels: mergeLevels(s.levels) };
-  if (!out.scriptUrl) out.scriptUrl = DEFAULT_SCRIPT_URL;
+  // A phone that ran the in-browser TEST site keeps its stand-in address: a real build replaces it.
+  if (!out.scriptUrl || (out.scriptUrl === HARNESS_URL && DEFAULT_SCRIPT_URL && !TEST_SITE)) out.scriptUrl = DEFAULT_SCRIPT_URL;
   return out;
 }
 async function saveSettings(patch) {
@@ -233,7 +236,7 @@ async function startRecheck(sid, boxId, kind, photoId, images) {
 
 function fieldLine(b, f) {
   const unit = f === 'weight' ? 'kg' : 'cm', v = b.readings[f], src = b.reads[f];
-  const job = b.read_jobs[f === 'weight' ? 'measure-scale' : f === 'breadth' ? 'measure-breadth' : 'measure-length-height'];
+  const job = b.read_jobs[FIELD_KIND[f]];
   if (v && !checkReading(f, v)) {
     const how = src && src.source === 'typed' ? `typed${src.read_value ? `, read ${esc(src.read_value)}` : ''}` : `read${src && src.confidence ? ', ' + esc(src.confidence) : ''}`;
     return { ok: true, html: `<b>${esc(v)} ${unit}</b> <span class="small muted">(${how})</span>`, conf: src && src.confidence, typed: src && src.source === 'typed' };
@@ -522,7 +525,7 @@ async function screenMeasure(boxId, step) {
 
 // ---------------------------------------------------------------- the readings of a box (read from its photos)
 const FIELD_NAMES = { weight: 'Weight', length: 'Length', breadth: 'Breadth', height: 'Height' };
-const KIND_SHORT = { 'measure-scale': 'weight', 'measure-length-height': 'length + height', 'measure-breadth': 'breadth' };
+const KIND_SHORT = { 'measure-scale': 'weight', 'measure-length': 'length', 'measure-breadth': 'breadth', 'measure-height': 'height' };
 
 function readingsCard(s, b, byId, urls) {
   const rows = ['weight', 'length', 'breadth', 'height'].map((f) => {
@@ -654,7 +657,14 @@ async function screenCapture(sid, bid, kind) {
   const st = app.settings, lv = st.levels, info = KIND_INFO[kind];
   // Multi-box: the team taps the box number printed on the label (Box x/y) before each label photo.
   let picked = !(multi && kind === 'label');
-  view(`<div class="cam"><div class="stage"><video playsinline muted></video><canvas class="ov"></canvas>
+  // v1.3: by default the photo is taken with the phone's own camera app (full resolution, its own focus and
+  // framing) and checked when it comes back; 'live' is the in-app camera that takes the photo by itself.
+  const fileMode = st.cameraMode !== 'live';
+  view(`<div class="cam${fileMode ? ' file' : ''}"><div class="stage"><video playsinline muted></video><canvas class="ov"></canvas>
+      ${fileMode ? `<div class="fileph"><div class="big">Take this photo with the phone's camera</div>
+        <div class="small">Get close: what is read should fill a good part of the picture. Tap to focus, hold still.</div>
+        <button id="snap">Open the camera</button><button id="gallery" class="ghost">Choose a photo from the gallery</button></div>` : ''}
+      <input type="file" accept="image/*" capture="environment" id="fcam" hidden><input type="file" accept="image/*" id="fgal" hidden>
       <div class="top"><div class="t1"><b id="ttl"></b>${st.test ? '<span class="pill test">TEST</span>' : ''}<button class="x" id="close">Close</button></div>
         <div class="t2" id="awbline"></div><div class="boxchips" id="boxchips"></div></div>
       <svg class="ring" viewBox="0 0 54 54"><circle cx="27" cy="27" r="22" stroke="rgba(255,255,255,.25)" stroke-width="6" fill="none"/>
@@ -679,7 +689,7 @@ async function screenCapture(sid, bid, kind) {
   const expected = () => (b && b.label ? b.label.code : s.awb);
   function header() {
     if (isMeasure) {
-      $('#ttl').textContent = `${multi ? `Box ${b.n}/${boxes.length} · ` : ''}Reading ${info.step}/3: ${info.title}`;
+      $('#ttl').textContent = `${multi ? `Box ${b.n}/${boxes.length} · ` : ''}Reading ${info.step}/${MEASURE_KINDS.length}: ${info.title}`;
       $('#awbline').textContent = 'Before booking: the numbers are read from this photo';
     } else {
       const step = kind === 'boxes' ? '' : `Step ${BOX_KINDS.indexOf(kind) + 1}/4 · `;
@@ -792,6 +802,41 @@ async function screenCapture(sid, bid, kind) {
     if (act === 'redo') { await R.cancelShipment(s, 're-measure changed the booking'); await rowsChanged(s, boxes); go('#/'); }
   }
 
+  // -- the phone's camera app (v1.3): no live picture and no analysis loop. The photo comes back as a file and
+  // goes through the same checks, naming and upload as an in-app photo; a photo that fails is shown with why.
+  let lastInput = null;
+  function openCamera(from) {
+    if (!picked) { toast('Tap the box number printed on the label first', 'bad'); return; }
+    if (busy) return;
+    if (st.demo) { demoFileShot().then((f) => useFile(f, 'demo camera app')); return; }
+    lastInput = from === 'gallery' ? $('#fgal') : $('#fcam');
+    lastInput.value = '';
+    lastInput.click();
+  }
+  async function demoFileShot() {   // computer demo: a drawn photo stands in for the camera app
+    const dc = new DemoCamera();
+    dc.setScene({ kind, code: !b || b.n === 1 ? DEMO_AWB : DEMO_AWB.slice(0, -1) + b.n, code2: DEMO_AWB.slice(0, -1) + '2', truth: b ? b.demo_truth : null, label: !isMeasure });
+    dc.shakeUntil = 0;
+    const r = await dc.takePhoto();
+    return new File([r.blob], 'demo.jpg', { type: 'image/jpeg', lastModified: Date.now() });
+  }
+  async function useFile(file, via) {
+    if (!file || busy) return;
+    const t = file.lastModified && file.lastModified <= Date.now() + 60000 ? new Date(file.lastModified) : new Date();
+    const agoMin = Math.max(0, Math.round((Date.now() - t.getTime()) / 60000));
+    await capture(null, null, false, { blob: file, via, when: via === 'gallery' ? t : new Date(), agoMin: via === 'gallery' ? agoMin : 0 });
+  }
+  if (fileMode) {
+    stopCamera();   // the camera app needs the camera to itself
+    header();
+    $('#snap').onclick = () => openCamera('camera');
+    $('#gallery').onclick = () => openCamera('gallery');
+    $('#fcam').onchange = () => useFile($('#fcam').files[0], 'camera app');
+    $('#fgal').onchange = () => useFile($('#fgal').files[0], 'gallery');
+    if (kind === 'label') barcode.getDetector().catch((e) => toast('Barcode reader failed to load: ' + e.message, 'bad'));
+    return;
+  }
+
   // -- camera
   try {
     await ensureCamera(video);
@@ -859,6 +904,38 @@ async function screenCapture(sid, bid, kind) {
 
   function chip(label, ok, wait) { return `<span class="chip ${ok ? 'ok' : wait ? 'wait' : 'no'}">${label} ${ok ? '✓' : wait ? '…' : '✗'}</span>`; }
 
+  // Camera app: the label photo itself attaches the AWB (one read of the full photo; no live scanning).
+  async function attachFromPhoto(rc) {
+    if (rc.orderRef && !s.order_ref) { s.order_ref = rc.orderRef; await db.put('shipments', s); }
+    if (!picked || !b) return;
+    const ownedByOther = (c) => boxes.find((o) => o.id !== b.id && o.label && o.label.child && o.label.code === c);
+    const mine = rc.cands.filter((c) => !ownedByOther(c));
+    if (!s.awb) {
+      if (mine.length === 1) await attach(mine[0], 'scan', rc.all);
+      else if (mine.length > 1) await choose(mine, rc.all);
+    } else if (!b.label) {
+      if (mine.includes(s.awb)) await attach(s.awb, 'scan', rc.all);
+      else if (mine.length === 1) await attach(mine[0], 'scan', rc.all);
+      else if (mine.length > 1) await choose(mine, rc.all);
+    }
+  }
+
+  // Camera app: a photo that failed a check is shown with the reason; retake it or use it anyway.
+  function showFailed(preview, reasons, given) {
+    const url = URL.createObjectURL(preview);
+    const needAwb = kind === 'label' && !(s.awb && b && b.label);
+    review.innerHTML = `<img src="${url}" alt="photo just taken"><div class="ok bad">Not saved: ${esc(reasons.join('; '))}</div>
+      <div class="line">${needAwb ? 'The AWB comes from this label photo: retake it closer and sharper, or type the AWB.' : 'Retake it, or use it anyway (the Sheet marks it "taken anyway").'}</div>
+      <div class="actions"><button id="fretake" class="go">Retake</button>${needAwb ? '<button id="ftype">Type the AWB</button>' : '<button id="fuse">Use it anyway</button>'}</div>`;
+    review.classList.remove('hidden');
+    const close = () => { URL.revokeObjectURL(url); review.classList.add('hidden'); review.innerHTML = ''; };
+    $('#fretake').onclick = () => { close(); openCamera(given.via === 'gallery' ? 'gallery' : 'camera'); };
+    const use = $('#fuse');
+    if (use) use.onclick = () => { close(); capture(null, null, true, given); };
+    const ty = $('#ftype');
+    if (ty) ty.onclick = async () => { await typeAwb(); if (s.awb && b && b.label) { close(); capture(null, null, false, given); } };
+  }
+
   async function frame() {
     if (busy || !video.videoWidth || !review.classList.contains('hidden')) return;
     const vw = video.videoWidth, vh = video.videoHeight, now = performance.now();
@@ -899,22 +976,27 @@ async function screenCapture(sid, bid, kind) {
     if (ready) await capture(m.sharp, steadyMs, false);
   }
 
-  async function capture(trigger, steadyMs, forced) {
+  // `given`: a photo from the phone's camera app or the gallery ({blob, via, when, agoMin}); otherwise the
+  // in-app camera takes it now.
+  async function capture(trigger, steadyMs, forced, given) {
     if (busy) return;
     busy = true;
-    busyEl.textContent = 'Taking photo...'; busyEl.classList.remove('hidden');
-    const when = new Date(), id = uuid();
+    busyEl.textContent = given ? 'Checking the photo...' : 'Taking photo...'; busyEl.classList.remove('hidden');
+    const when = given ? given.when : new Date(), id = uuid();
     try {
-      const shot = await app.camera.takePhoto();
+      // Reading photos at the camera's full resolution; proof photos at about 4,000 px (they are cut to 2 MB).
+      const shot = given || await app.camera.takePhoto({ full: isMeasure });
       if (!run.alive) return;
       busyEl.textContent = 'Checking the photo...';
-      const vw = video.videoWidth, vh = video.videoHeight, aspect = vw / vh, zone = glareZone(look, st.calib, aspect);
+      // Outlines, glare zones and close-ups come from the calibrated mounts: only for the in-app camera.
+      const aspect = given ? null : video.videoWidth / video.videoHeight, zone = given ? null : glareZone(look, st.calib, aspect);
       // Images for the reader only when there is one (and, for a proof photo, a booking to compare with).
       readingNow = !readerOff() && (isMeasure || (recheck && !!(b && b.book)));
       const job = stillJob({
         blob: shot.blob, zone, spotShare: lv.glareSpot, previewAspect: aspect,
-        maxLong: MAX_LONG_SIDE, maxBytes: MAX_JPEG_BYTES, minQuality: MIN_QUALITY, probeLong: kind === 'label' ? 1800 : 0,
-        read: readingNow ? { long: READ_LONG_SIDE, quality: 0.85, crops: readCrops(kind, st.calib, aspect) } : null,
+        maxLong: isMeasure ? 20000 : MAX_LONG_SIDE, maxBytes: isMeasure ? READ_MAX_BYTES : MAX_JPEG_BYTES, minQuality: MIN_QUALITY,
+        keepOriginal: isMeasure ? READ_MAX_BYTES : 0, probeLong: kind === 'label' ? (given ? 2400 : 1800) : 0,
+        read: readingNow ? { long: READ_LONG_SIDE, quality: 0.85, crops: given ? [] : readCrops(kind, st.calib, aspect) } : null,
         exif: {
           make: st.phoneMake, model: st.phoneModel, software: `TFC Packing Proof ${APP_VERSION}`, dateMs: when.getTime(), uniqueId: id,
           description: `TFC packing proof | AWB ${s.awb || 'not yet booked'} | ${b ? `box ${b.n} of ${boxes.length}` : `${boxes.length} boxes`} | ${kind}`,
@@ -925,12 +1007,17 @@ async function screenCapture(sid, bid, kind) {
       if (!c.ok) throw new Error(c.error);
       const sj = judge(c.metrics, kind, lv, !!zone), reasons = [...sj.reasons];
       if (trigger && c.metrics.sharp < lv.stillRatio * trigger) reasons.push(`still less sharp than the preview (${Math.round(c.metrics.sharp)} vs ${Math.round(trigger)})`);
+      if (given && given.agoMin > 30) reasons.push(`this photo was taken ${given.agoMin} minutes ago`);
       let note = '';
       if (kind === 'label') {
         if (typed) note = 'AWB typed, barcode not read';
         else {
           let seen = false;
-          try { const f = await barcode.detect(c.probe, c.probe.width, c.probe.height); seen = readCodes(f).cands.includes(expected()); } catch { seen = false; }
+          try {
+            const f = await barcode.detect(c.probe, c.probe.width, c.probe.height), rc = readCodes(f);
+            if (given) await attachFromPhoto(rc);   // camera app: the label photo itself attaches the AWB
+            seen = rc.cands.includes(expected());
+          } catch { seen = false; }
           note = seen ? 'barcode read on the still' : 'barcode NOT read on the still';
           if (!seen) reasons.push('barcode not readable in the photo');
         }
@@ -940,6 +1027,7 @@ async function screenCapture(sid, bid, kind) {
       if (!pass && !forced) {
         job.cancel();
         busyEl.classList.add('hidden');
+        if (given) { showFailed(c.preview, reasons, given); busy = false; return; }
         toast('Not saved: ' + reasons[0] + '. Hold steady - it tries again.', 'bad');
         steadySince = 0; await sleep(700); busy = false;
         return;
@@ -953,9 +1041,10 @@ async function screenCapture(sid, bid, kind) {
       if (!res.ok) throw new Error(res.error);
       const checks = {
         captured_at: isoLocal(when), pass, forced: !!forced && !pass, reasons, level: sj.need, trigger: trigger ? Math.round(trigger) : null,
-        steady_ms: Math.round(steadyMs), still: c.metrics, barcode: note, size: `${res.width}x${res.height}`, quality: res.quality,
+        steady_ms: given ? null : Math.round(steadyMs), still: c.metrics, barcode: note, size: `${res.width}x${res.height}`, quality: res.quality,
         bytes: res.bytes, via: shot.via, src: `${c.src.w}x${c.src.h}`, encodes: res.encodes, ms: res.ms, preview_aspect: aspect,
-        engine: kind === 'label' ? barcode.engine : undefined, camera: app.camInfo ? app.camInfo.label : '',
+        engine: kind === 'label' ? barcode.engine : undefined, camera: given ? '' : app.camInfo ? app.camInfo.label : '',
+        taken_ago_min: given && given.agoMin ? given.agoMin : undefined,
       };
       const p = await R.addPhoto(s, b, kind, { id, blob: res.jpeg, width: res.width, height: res.height, quality: res.quality, captured_at: checks.captured_at, checks }, byId);
       app.uploader.kick();
@@ -1003,6 +1092,7 @@ async function screenCapture(sid, bid, kind) {
           done(); review.classList.add('hidden'); review.innerHTML = '';
           steadySince = 0; peaks = []; started = performance.now(); showTake = false; actions(); busy = false;
           toast('Retake: the new photo is saved as the next number and marked final');
+          if (fileMode) openCamera(checks.via === 'gallery' ? 'gallery' : 'camera');
         };
         nb.onclick = next;
       },
@@ -1121,7 +1211,9 @@ async function screenSettings() {
     <label class="field">Station name<input type="text" id="station" value="${esc(st.station)}"></label>
     <label class="check"><input type="checkbox" id="testmode" ${st.test ? 'checked' : ''}><span><b>TEST mode</b><br><span class="small muted">Files go to Packing Proof/TEST and rows to the "TEST boxes" tab. Turn off to go live.</span></span></label>
     <h2>Camera</h2>
-    <label class="field">Camera <span class="hint">The main rear camera (50 MP). Names appear after the first photo screen allows the camera.</span>
+    <label class="field">How photos are taken <span class="hint">The phone's camera app: you frame, focus and tap the shutter, at the camera's full resolution; the app checks each photo when it comes back. In-app camera: the app takes the photo by itself once the picture is sharp, steady and well lit.</span>
+      <select id="cammode"><option value="app" ${st.cameraMode !== 'live' ? 'selected' : ''}>The phone's camera app (recommended)</option><option value="live" ${st.cameraMode === 'live' ? 'selected' : ''}>In-app camera (takes the photo by itself)</option></select></label>
+    <label class="field">In-app camera lens <span class="hint">Only for the in-app camera: the main rear camera, not the wide-angle. Names appear after the first photo screen allows the camera.</span>
       <select id="cam"><option value="">Automatic (rear camera)</option>${cams.map((c) => `<option value="${esc(c.id)}" ${c.id === st.cameraId ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}</select></label>
     <div class="row"><label class="field">Phone make<input type="text" id="make" value="${esc(st.phoneMake)}" placeholder="e.g. Samsung"></label>
       <label class="field">Phone model<input type="text" id="model" value="${esc(st.phoneModel)}" placeholder="e.g. SM-A356E"></label></div>
@@ -1157,7 +1249,7 @@ async function screenSettings() {
     for (const el of document.querySelectorAll('[data-sharp]')) sharp[el.dataset.sharp] = Math.max(0, Number(el.value) || 0);
     return {
       scriptUrl: $('#url').value.trim(), key: $('#key').value.trim(), station: $('#station').value.trim() || 'Station 1',
-      test: $('#testmode').checked || $('#demo').checked, demo: $('#demo').checked, cameraId: $('#cam').value,
+      test: $('#testmode').checked || $('#demo').checked, demo: $('#demo').checked, cameraId: $('#cam').value, cameraMode: $('#cammode').value,
       phoneMake: $('#make').value.trim(), phoneModel: $('#model').value.trim(),
       testAiKey: $('#aikey') ? $('#aikey').value.trim() : st.testAiKey || '',
       levels: mergeLevels({ ...st.levels, sharp, steadyMs: Number($('#steadyMs').value) || 500, brightMin: Number($('#brightMin').value) || 0,
@@ -1366,7 +1458,7 @@ async function boot() {
         // the real camera is used and the mounts are calibrated by hand.
         const demo = qs.has('demo') && qs.get('demo') !== '0', aspect = 1280 / 720;
         await saveSettings({
-          scriptUrl: 'http://localhost/demo-backend', key: h.state.key, station: 'Demo station', test: true, demo, setupDone: true,
+          scriptUrl: HARNESS_URL, key: h.state.key, station: 'Demo station', test: true, demo, setupDone: true,
           phoneModel: app.settings.phoneModel || (demo ? 'Demo phone' : ''),
           calib: demo ? { bay: { pts: DEFAULT_BAY, aspect }, scale: { pts: DEFAULT_PLATFORM, display: DEFAULT_DISPLAY, aspect } } : {},
         });
