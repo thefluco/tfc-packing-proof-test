@@ -1,6 +1,6 @@
 // Service worker: keeps the app working with no network (the upload queue lives in IndexedDB).
 // Bump VERSION with every release so phones pick up the new files.
-const VERSION = 'pp-test-20261016-2104';
+const VERSION = 'pp-test-20261016-2128';
 const VENDOR = 'pp-vendor';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
