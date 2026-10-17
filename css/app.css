@@ -117,6 +117,17 @@ h1.ttl { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; }
 .spin { width: 54px; height: 54px; border-radius: 50%; border: 6px solid var(--line); border-top-color: var(--ink); animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* redo: tiles per box */
+.rbox { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 10px 12px; display: flex; flex-direction: column; gap: 10px; }
+.rbox .hd { font-size: 19px; font-weight: 700; }
+.rtiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.rtile { min-height: 74px; border-radius: 12px; border: 2px solid var(--line); background: #f5f7fa; color: #8a97a6; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 4px 2px; font-size: 13px; font-weight: 600; line-height: 1.1; }
+.measure-ink .rtile.done { background: var(--measure-bg); border-color: var(--measure); color: var(--measure); }
+.proof-ink .rtile.done { background: var(--proof-bg); border-color: var(--proof); color: var(--proof); }
+.rtile.sel { background: var(--amber-bg) !important; border-color: var(--amber) !important; color: var(--amber-ink) !important; border-width: 3px; }
+.rtile:disabled { opacity: .45; }
+.rtile .tag { font-size: 11px; }
+
 /* PIN pad */
 .pinpad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; width: 100%; max-width: 340px; }
 .pinpad button { min-height: 72px; border-radius: 16px; border: 1px solid var(--line); background: #fff; font-size: 30px; font-weight: 700; color: var(--ink); }
