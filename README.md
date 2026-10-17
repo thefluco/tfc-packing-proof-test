@@ -1,6 +1,7 @@
-# TFC Packing Proof - TEST site
+# TFC Packing Proof - TEST phase
 
-A test build of the packing-station photo app. It runs a stand-in for its Google backend inside the browser,
-so photos and Sheet rows stay on the device that took them. It holds no keys and sends nothing to Google.
+The packing-station photo app, talking to its Google Apps Script backend: photos go to the "Packing Proof"
+folder in Google Drive and one row per box to the "Packing Proof" Sheet (TEST mode: the TEST folder and the
+"TEST boxes" tab). Nothing works without the station key, which is typed on the phone and never in this code.
 
-Built 20261016-2128 by `tests/make_test_site.py`.
+Built 20261017-1509 by `tests/make_test_site.py --backend`.

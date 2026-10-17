@@ -1,12 +1,12 @@
 // Service worker: keeps the app working with no network (the upload queue lives in IndexedDB).
 // Bump VERSION with every release so phones pick up the new files.
-const VERSION = 'pp-test-20261016-2128';
+const VERSION = 'pp-live-20261017-1509';
 const VENDOR = 'pp-vendor';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/main.js', 'js/config.js', 'js/logic.js', 'js/quality.js', 'js/exif.js', 'js/still-worker.js', 'js/store.js',
   'js/records.js', 'js/uploader.js', 'js/barcode.js', 'js/camera.js', 'js/demo.js', 'js/overlay.js', 'js/reader.js',
-  'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'test-backend/gas-harness.js', 'apps-script/Code.gs',
+  'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 
 self.addEventListener('install', (e) => {
