@@ -1,1 +1,1 @@
-Generated 20261017-1606 by tests/make_test_site.py. Safe to delete and rebuild.
+Generated 20261017-2006 by tests/make_test_site.py. Safe to delete and rebuild.
