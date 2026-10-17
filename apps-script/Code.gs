@@ -27,7 +27,7 @@
  */
 
 var PP = {
-  VERSION: '1.2.0',
+  VERSION: '1.3.0',
   ROOT_NAME: 'Packing Proof',
   TEST_NAME: 'TEST',
   SHEET_NAME: 'Packing Proof',
@@ -36,18 +36,22 @@ var PP = {
   TAB_FILES: 'Files',
   TAB_LOG: 'Station log',
   MAX_BYTES: 2000000,
+  MAX_READ_BYTES: 8000000,
   TZ: 'Asia/Kolkata',
   FOLDER_MIME: 'application/vnd.google-apps.folder',
   SHEET_MIME: 'application/vnd.google-apps.spreadsheet',
 };
 
 // Proof photos (label, scale, length-height, breadth, boxes) plus the reading photos taken before the label
-// (measure-*), which the numbers to book were read from. sync.py counts only the proof kinds as dispute images.
-var NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length-height|measure-breadth)-(\d{2})\.jpg$/;
+// (measure-*, v1.3: weight, length, breadth, height), which the numbers to book are read from. sync.py counts only
+// the proof kinds as dispute images.
+var NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length|measure-breadth|measure-height)-(\d{2})\.jpg$/;
 var KIND_COLS = {
   'label': 'Label', 'breadth': 'Breadth', 'length-height': 'Length-height', 'scale': 'Scale', 'boxes': 'Boxes',
-  'measure-scale': 'Measure weight', 'measure-length-height': 'Measure length-height', 'measure-breadth': 'Measure breadth',
+  'measure-scale': 'Measure weight', 'measure-length': 'Measure length', 'measure-breadth': 'Measure breadth', 'measure-height': 'Measure height',
 };
+// Proof photos go to Shipmozo (2 MB each); reading photos are kept at the camera's full resolution.
+function maxBytes_(kind) { return /^measure-/.test(kind) ? PP.MAX_READ_BYTES : PP.MAX_BYTES; }
 
 // ------------------------------------------------------------------ the Sheet's columns
 // [header, value from (row snapshot, request)] - undefined keeps what the cell already holds.
@@ -116,8 +120,12 @@ var BOX_COLS = [
   ['Readings source', function (s) { return s.readings_source || undefined; }],
   ['Re-read check', function (s) { return s.reread || ''; }],
   ['Measure weight photo', photoUrl_('measure-scale')],
-  ['Measure length-height photo', photoUrl_('measure-length-height')],
+  ['Measure length photo', photoUrl_('measure-length')],
   ['Measure breadth photo', photoUrl_('measure-breadth')],
+  ['Measure height photo', photoUrl_('measure-height')],
+  // v1.3: the checks of each reading photo (camera used, size, sharpness), to compare ways of taking them.
+  ['Checks measure weight', photoChecks_('measure-scale')], ['Checks measure length', photoChecks_('measure-length')],
+  ['Checks measure breadth', photoChecks_('measure-breadth')], ['Checks measure height', photoChecks_('measure-height')],
 ];
 var FILE_COLS = ['Uploaded', 'Test', 'AWB', 'Box', 'Kind', 'No.', 'File', 'Link', 'Bytes', 'Final when uploaded', 'Captured', 'Station', 'Phone', 'Upload ID'];
 var LOG_COLS = ['Logged', 'Test', 'Station', 'Type', 'Reading', 'Result', 'Notes', 'Phone', 'App', 'Entry ID'];
@@ -238,7 +246,7 @@ function photo_(req) {
   var month = /^20\d\d-(0[1-9]|1[0-2])$/.test(String(req.month || '')) ? req.month : Utilities.formatDate(new Date(), PP.TZ, 'yyyy-MM');
   var bytes = Utilities.base64Decode(String(req.jpeg_b64 || ''));
   if (!bytesOk_(bytes)) return { ok: false, code: 'bad_image', error: 'not a JPEG' };
-  if (bytes.length > PP.MAX_BYTES) return { ok: false, code: 'too_big', error: bytes.length + ' bytes' };
+  if (bytes.length > maxBytes_(req.kind)) return { ok: false, code: 'too_big', error: bytes.length + ' bytes' };
   var sha = hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes));
   if (req.sha256 && String(req.sha256).toLowerCase() !== sha) return { ok: false, code: 'bad_hash', error: 'the photo arrived damaged; resend' };
 
@@ -296,57 +304,74 @@ function photo_(req) {
 function a1Tab_(tab, a1) { return "'" + tab.replace(/'/g, "''") + "'!" + a1; }
 function col_(n) { var s = ''; while (n > 0) { var r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = Math.floor((n - 1) / 26); } return s; }
 
-// Make sure `tab` exists with our header row (cached for 6 hours). Only ever adds columns at the end.
+// Make sure `tab` exists and its first row holds every one of `headers`; returns the header row as it stands in
+// the Sheet (cached for 5 minutes). Columns are found by their header, so columns moved or added by hand stay
+// where they are; a missing header is added at the end (the tab is widened first: a new tab has only 26 columns).
+// Nothing is ever removed or reordered.
 function ensureTab_(sheetId, tab, headers) {
-  var cache = CacheService.getScriptCache(), ck = 't|' + sheetId + '|' + tab + '|' + headers.length;
-  if (cache.get(ck)) return;
-  var meta = Sheets.Spreadsheets.get(sheetId, { fields: 'sheets.properties(sheetId,title,index)' });
+  var cache = CacheService.getScriptCache(), ck = 'h|' + sheetId + '|' + tab;
+  var hit = cache.get(ck);
+  if (hit) {
+    var known = JSON.parse(hit);
+    if (headers.every(function (h) { return known.indexOf(h) >= 0; })) return known;
+  }
+  var meta = Sheets.Spreadsheets.get(sheetId, { fields: 'sheets.properties(sheetId,title,index,gridProperties)' });
   var sheets = (meta.sheets || []).map(function (s) { return s.properties; });
   var have = sheets.filter(function (p) { return p.title === tab; })[0];
-  var reqs = [];
   if (!have) {
     var blank = sheets.filter(function (p) { return p.title === 'Sheet1' || p.title === 'Sheet 1'; })[0];
     if (blank && tab === PP.TAB_LIVE) {
       Sheets.Spreadsheets.batchUpdate({ requests: [{ updateSheetProperties: { properties: { sheetId: blank.sheetId, title: tab }, fields: 'title' } }] }, sheetId);
-      have = { sheetId: blank.sheetId, title: tab };
+      have = blank;
     } else {
       var r = Sheets.Spreadsheets.batchUpdate({ requests: [{ addSheet: { properties: { title: tab } } }] }, sheetId);
       have = r.replies[0].addSheet.properties;
     }
   }
   var top = (Sheets.Spreadsheets.Values.get(sheetId, a1Tab_(tab, '1:1')).values || [[]])[0] || [];
-  var prefix = top.every(function (h, i) { return h === headers[i]; });
-  if (!top.length || (prefix && top.length < headers.length)) {
-    Sheets.Spreadsheets.Values.update({ values: [headers] }, sheetId, a1Tab_(tab, 'A1'), { valueInputOption: 'RAW' });
-    reqs.push({ updateSheetProperties: { properties: { sheetId: have.sheetId, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' } });
+  var missing = headers.filter(function (h) { return top.indexOf(h) < 0; });
+  if (missing.length) {
+    var reqs = [], cols = (have.gridProperties && have.gridProperties.columnCount) || 26, need = top.length + missing.length;
+    if (need > cols) {
+      Sheets.Spreadsheets.batchUpdate({ requests: [{ appendDimension: { sheetId: have.sheetId, dimension: 'COLUMNS', length: need - cols } }] }, sheetId);
+    }
+    Sheets.Spreadsheets.Values.update({ values: [missing] }, sheetId, a1Tab_(tab, col_(top.length + 1) + '1'), { valueInputOption: 'RAW' });
+    if (!top.length) reqs.push({ updateSheetProperties: { properties: { sheetId: have.sheetId, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' } });
     reqs.push({ repeatCell: { range: { sheetId: have.sheetId, startRowIndex: 0, endRowIndex: 1 }, cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: 'userEnteredFormat.textFormat.bold' } });
-  } else if (!prefix) {
-    console.warn('Header row of ' + tab + ' was changed by hand; leaving it as it is.');
+    Sheets.Spreadsheets.batchUpdate({ requests: reqs }, sheetId);
+    top = top.concat(missing);
   }
-  if (reqs.length) Sheets.Spreadsheets.batchUpdate({ requests: reqs }, sheetId);
-  cache.put(ck, '1', 21600);
+  cache.put(ck, JSON.stringify(top), 300);
+  return top;
+}
+
+// A row laid out by the Sheet's own header row: `values` maps header -> value; other columns are left blank.
+function byHeader_(top, values) {
+  return top.map(function (h) { return Object.prototype.hasOwnProperty.call(values, h) ? values[h] : ''; });
 }
 
 function appendRow_(sheetId, tab, headers, row) {
-  ensureTab_(sheetId, tab, headers);
-  Sheets.Spreadsheets.Values.append({ values: [row] }, sheetId, a1Tab_(tab, 'A1'), { valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS' });
+  var top = ensureTab_(sheetId, tab, headers), values = {};
+  headers.forEach(function (h, i) { values[h] = row[i]; });
+  Sheets.Spreadsheets.Values.append({ values: [byHeader_(top, values)] }, sheetId, a1Tab_(tab, 'A1'), { valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS' });
 }
 
 // One row per box, keyed by Box ID. Cells the snapshot does not know keep their value; "Team notes" is never written.
 function upsertRows_(sheetId, tab, rows, req, link) {
   if (!rows.length) return 0;
-  var headers = BOX_COLS.map(function (c) { return c[0]; });
-  ensureTab_(sheetId, tab, headers);
-  var last = col_(headers.length);
-  var ids = (Sheets.Spreadsheets.Values.get(sheetId, a1Tab_(tab, 'A:A')).values || []).map(function (r) { return r[0]; });
+  var top = ensureTab_(sheetId, tab, BOX_COLS.map(function (c) { return c[0]; }));
+  var idCol = col_(top.indexOf('Box ID') + 1), last = col_(top.length);
+  var ids = (Sheets.Spreadsheets.Values.get(sheetId, a1Tab_(tab, idCol + ':' + idCol)).values || []).map(function (r) { return r[0]; });
   rows.forEach(function (snap) {
     if (!snap || !snap.box_id) return;
     var at = ids.indexOf(snap.box_id);
     var cur = at > 0 ? ((Sheets.Spreadsheets.Values.get(sheetId, a1Tab_(tab, 'A' + (at + 1) + ':' + last + (at + 1)), { valueRenderOption: 'UNFORMATTED_VALUE' }).values || [[]])[0] || []) : [];
-    var row = BOX_COLS.map(function (c, i) {
+    // Start from the row as it is (columns we do not own - Team notes, anything added by hand - are kept).
+    var row = top.map(function (h, i) { return cur[i] === undefined ? '' : cur[i]; });
+    BOX_COLS.forEach(function (c) {
       var v = c[1](snap, req);
       if (link && link.final && c[0] === KIND_COLS[link.kind] + ' photo') v = link.url;
-      return v === undefined ? (cur[i] === undefined ? '' : cur[i]) : v;
+      if (v !== undefined) row[top.indexOf(c[0])] = v;
     });
     if (at > 0) {
       Sheets.Spreadsheets.Values.update({ values: [row] }, sheetId, a1Tab_(tab, 'A' + (at + 1)), { valueInputOption: 'RAW' });
@@ -394,7 +419,26 @@ var READ_BAY = 'The measuring bay: a white base 180 x 75 cm with a back wall alo
   'back-left corner, one end against the left wall and one side against the back wall. ';
 var READ_HALF = ' Give centimetres, to the nearest half centimetre where the marks allow.';
 var CONF = { type: 'string', enum: ['high', 'medium', 'low'] };
+// v1.3 reading photos (no station yet): a close-up of a tape measure at one edge of the parcel, one number each.
+function tapeSpec_(what, where) {
+  return {
+    ask: 'A close-up of a tape measure against a parcel, taken to measure its ' + what + '. The tape\'s zero is held at the ' +
+      'far edge, out of the picture. Read the tape where ' + where + '. Give the reading in cm with its decimal (mm marks), ' +
+      'e.g. "103.4"; if the marks between numbers are not clear, the nearest half cm, rounding up.',
+    schema: {
+      type: 'object', additionalProperties: false, required: ['readable', 'value_cm', 'confidence', 'notes'],
+      properties: {
+        readable: { type: 'boolean' }, value_cm: { type: 'string', description: 'e.g. "103.4". Empty if unreadable.' },
+        confidence: CONF, notes: { type: 'string' },
+      },
+    },
+  };
+}
+var TAPE_FIELD = { 'measure-length': 'length', 'measure-breadth': 'breadth', 'measure-height': 'height' };
 var READ_SPECS = {
+  'measure-length': tapeSpec_('length', 'the parcel\'s end (or a flat board pressed against it) meets the tape'),
+  'measure-breadth': tapeSpec_('breadth', 'the parcel\'s side at its widest point (or a flat board pressed against it) meets the tape'),
+  'measure-height': tapeSpec_('height', 'a flat board laid across the parcel\'s highest point (or the top of the parcel) meets the upright tape'),
   'scale': {
     ask: 'A parcel on a platform weighing scale. Read the weight on the scale\'s digital display exactly as shown, in kg, ' +
       'keeping every decimal. Also say whether the parcel rests only on the platform with both ends clear of the floor, ' +
@@ -440,7 +484,7 @@ var READ_SPECS = {
 // {url, headers, body} for POST /v1/messages (the caller adds x-api-key). Shared with the test site's harness.
 function buildReadRequest_(req, model, effort) {
   var base = String(req.kind || '').replace(/^measure-/, '');
-  var spec = READ_SPECS[base];
+  var spec = READ_SPECS[req.kind] || READ_SPECS[base];   // the tape reading photos, else the station's
   if (!spec) throw new Error('unknown reading: ' + req.kind);
   var content = [];
   (req.images || []).slice(0, 6).forEach(function (im, i) {
@@ -473,7 +517,11 @@ function parseReadResponse_(kind, res) {
   var o;
   try { o = JSON.parse(text); } catch (e) { return { ok: false, code: 'reader_error', error: 'the reply was not JSON' }; }
   var base = String(kind || '').replace(/^measure-/, ''), values = {}, confidence = {}, flags = {};
-  if (base === 'scale') {
+  if (TAPE_FIELD[kind]) {
+    var f = TAPE_FIELD[kind];
+    if (o.readable && cleanReading_(o.value_cm)) values[f] = cleanReading_(o.value_cm);
+    confidence[f] = o.confidence;
+  } else if (base === 'scale') {
     if (o.readable && cleanReading_(o.weight_kg)) values.weight = cleanReading_(o.weight_kg);
     confidence.weight = o.confidence;
     flags = { on_platform_only: !!o.on_platform_only, display_steady: !!o.display_steady };
@@ -509,6 +557,31 @@ function read_(req) {
   if (status === 429 || status >= 500) return { ok: false, code: 'reader_busy', error: 'the reader is busy (HTTP ' + status + '); try again' };
   if (status !== 200) return { ok: false, code: 'reader_error', error: 'HTTP ' + status + ': ' + String((json && json.error && json.error.message) || body).slice(0, 200) };
   return parseReadResponse_(req.kind, json);
+}
+
+// ------------------------------------------------------------------ self-test (run from the editor after setup)
+// Saves a tiny TEST photo through the same code as a phone upload (no station key: the editor runs as the owner):
+// Packing Proof/TEST/<month>/SELFTEST000001/SELFTEST000001-ours-measure-length-NN.jpg, a "Files" row and a
+// "TEST boxes" row (Box ID SELFTEST-b1). Run again, it finds the same photo already there ("skipped": true), as a
+// repeated phone upload would. Nothing outside TEST.
+var SELFTEST_JPEG = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCABAAGADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDoaKKoX17eWt1bRQ2sMq3MnlqzzlCDsZuQEPGFPevFSuei3Yv0VmQ6pdPa3F3JZxiCAzDEcxeRvLZl4XaByV9e9RSazcrpdxfx2ltMkEZl3R3WUdQpPysF68dCPTmq5WLmRsUVHA0zR5uI443z92Ny4/MgfyqSpGFFFFAwooooAKKKKACq9za/aJ7SXft+zTGXGM7so6Y9vv5/CrFFAjIttEe2kuGjmt0aZ5W85LbEy72Lff3HOM+nanHRWktdRjlnjEt/D5TNFDsUcMN23ccn5uTnnA9K1aKrnYuVBRRRUlBRRRQAUUUUAFFFFABRRXnP/CvNX/5+LL/vt/8A4mtIRjLd2IlJrZXPRqK85/4V5q//AD8WX/fb/wDxNH/CvNX/AOfiy/77f/4mtPZU/wCcjnl/KejUV5z/AMK81f8A5+LL/vt//iaP+Feav/z8WX/fb/8AxNHsqf8AOHPL+U9Gorzn/hXmr/8APxZf99v/APE0f8K81f8A5+LL/vt//iaPZU/5w55fyno1Fec/8K81f/n4sv8Avt//AImj/hXmr/8APxZf99v/APE0eyp/zhzy/lPRqK85/wCFeav/AM/Fl/32/wD8TXe6dbvZ6Za2shUvDCkbFehIUA4rOcIx2lcuMm91Ys0UUVmWFFFFABRRRQAUUUUAFFFFABRRRQB//9k=';
+function selfTest() {
+  var awb = 'SELFTEST000001', kind = 'measure-length', bytes = Utilities.base64Decode(SELFTEST_JPEG), now = new Date().toISOString();
+  var month = Utilities.formatDate(new Date(), PP.TZ, 'yyyy-MM'), r = null;
+  var row = { box_id: 'SELFTEST-b1', shipment_id: 'SELFTEST', awb: awb, box: 1, boxes: 1, status: 'self-test', order_ref: '',
+    readings: {}, book: {}, photos: {}, created_at: now, station: 'Self-test (editor)', readings_source: '', reread: '' };
+  for (var nn = 1; nn < 50; nn++) {
+    r = photo_({
+      v: 1, action: 'photo', test: true, station: 'Self-test (editor)', phone: 'editor', app: 'selfTest ' + PP.VERSION,
+      upload_id: Utilities.getUuid(), name: awb + '-ours-' + kind + '-' + (nn < 10 ? '0' : '') + nn + '.jpg', awb: awb, month: month,
+      box: 1, boxes: 1, kind: kind, nn: nn, final: true, captured_at: now, bytes: bytes.length,
+      sha256: hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes)), jpeg_b64: SELFTEST_JPEG, rows: [row],
+    });
+    if (!r || r.code !== 'name_taken') break;   // an earlier self-test used this number
+  }
+  console.log('Self-test: ' + JSON.stringify(r));
+  console.log('Open the Sheet: ' + sheetUrl_(ids_().sheet) + ' (tab "TEST boxes", Box ID SELFTEST-b1; tab "Files")');
+  return r;
 }
 
 // ------------------------------------------------------------------ one-time setup (run from the editor)
