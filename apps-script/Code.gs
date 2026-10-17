@@ -4,37 +4,49 @@
  * The station phone POSTs JSON as text/plain (no CORS pre-flight). Every request carries the station key,
  * which is typed once on the phone; only its SHA-256 is stored here (Script Properties), never the key.
  *
- *   action "ping"  - checks the key; returns the Drive folder and Sheet links (the phone's "Test connection") and
- *                    whether a reader is set up (reader: true/false)
- *   action "photo" - saves one JPEG to Drive  Packing Proof/<YYYY-MM>/<AWB>/   (TEST: Packing Proof/TEST/...)
- *                    and updates the box row(s) in the "Packing Proof" Sheet
- *   action "row"   - updates box row(s) only (readings, numbers to book, AWB, status, times)
- *   action "log"   - appends a station-log row (start of shift, the Monday 10 kg scale test)
- *   action "read"  - reads the weight or the bay scales from a photo with Claude (vision) and returns the numbers;
- *                    nothing is stored. The Anthropic API key lives only in Script Properties (ANTHROPIC_API_KEY)
+ * v2 (two stages): MEASURE before booking (slip, weight, length, breadth, height per box -> the "Pre-booking" tab)
+ * and PROOF after booking (label, weight, length, breadth, height per box -> the "Boxes" tab, as in v1.4).
  *
- * The key is OPTIONAL. Without it the phone does not try to read: the reading photos are still saved and listed,
- * the number columns stay empty, and the numbers can be filled in later from the photos (a cell the phone has no
- * number for is never cleared, so a later fill stays).
+ *   action "ping"   - checks the key; returns the Drive folder and Sheet links (the phone's "Test connection")
+ *   action "photo"  - saves one JPEG to Drive and updates the box row(s) in the "Packing Proof" Sheet:
+ *                       PROOF    <AWB>[-b<n>]-ours-<kind>-<nn>.jpg   -> Packing Proof/<YYYY-MM>/<AWB>/
+ *                       MEASURE  <record>[-b<n>]-pre-<kind>-<nn>.jpg -> Packing Proof/Pre-booking/<YYYY-MM>/<YYYY-MM-DD>/<record>/
+ *                     (TEST mode: the same paths under Packing Proof/TEST/)
+ *   action "row"    - updates box row(s) only (status, flags, checks, times)
+ *   action "lookup" - reads the Pre-booking tab: by AWB (is it booked? the order number, the boxes and their AWBs) or
+ *                     by order number (already measured? already booked?)
+ *   action "log"    - appends a station-log row (supervisor actions)
+ *   action "read"   - (v1.1-1.3, unused since v2) reads numbers from a photo with Claude; needs ANTHROPIC_API_KEY
+ *
+ * A PROOF row also sets "Proof status" (done / missing / mismatch) and "Proof row" on its Pre-booking row. The tab
+ * "Check before pickup" lists the Pre-booking rows that have an AWB but no finished proof.
  *
  * Drive rules: it only CREATES. It never moves, renames, overwrites or deletes anything. A name that already
  * exists is skipped (same upload) or refused with code "name_taken" (the phone then uses the next number).
+ * Sheet rules: every value is written under its column header, so columns can be added or moved by hand; the
+ * columns that people or other steps fill (batch read, booking, Team notes) are never written by the phone.
  *
  * Scopes: drive.file (the script sees just the folders and files it created itself) and external_request (the
- * call to api.anthropic.com). One-time setup: run setup() in the editor (creates the folder, the TEST folder, the
- * Sheet and the station key), optionally add ANTHROPIC_API_KEY in Project Settings > Script properties, then
- * Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone. See README.md.
+ * unused reader). One-time setup: run setup() in the editor (creates the folder, the TEST folder, the Sheet, its
+ * tabs and the station key), then Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone.
+ * Updating: paste this file, run setup() once (adds the v2 tabs and columns), then Deploy > Manage deployments >
+ * edit > New version, so the /exec address stays the same. See README.md.
  */
 
 var PP = {
-  VERSION: '1.4.0',
+  VERSION: '2.0.0',
   ROOT_NAME: 'Packing Proof',
   TEST_NAME: 'TEST',
+  PRE_FOLDER: 'Pre-booking',
   SHEET_NAME: 'Packing Proof',
   TAB_LIVE: 'Boxes',
   TAB_TEST: 'TEST boxes',
   TAB_FILES: 'Files',
   TAB_LOG: 'Station log',
+  TAB_PRE: 'Pre-booking',
+  TAB_PRE_TEST: 'TEST pre-booking',
+  TAB_CHECK: 'Check before pickup',
+  TAB_CHECK_TEST: 'TEST check before pickup',
   MAX_BYTES: 2000000,        // Shipmozo's limit per image (the proof-photo cap before v1.4)
   MAX_READ_BYTES: 8000000,
   TZ: 'Asia/Kolkata',
@@ -42,15 +54,18 @@ var PP = {
   SHEET_MIME: 'application/vnd.google-apps.spreadsheet',
 };
 
-// Proof photos (label, scale, length-height, breadth, boxes) plus the reading photos taken before the label
-// (measure-*, v1.3: weight, length, breadth, height), which the numbers to book are read from. sync.py counts only
-// the proof kinds as dispute images.
+// PROOF photos (after booking) plus the retired reading kinds (measure-*, v1.1-1.3), still accepted so an old
+// phone's queue can finish. sync.py counts only the proof kinds as dispute images.
 var NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length|breadth|height|length-height|boxes|measure-scale|measure-length|measure-breadth|measure-height)-(\d{2})\.jpg$/;
+// MEASURE photos (before booking), named by record, never by order number: "-pre-" keeps them out of the dispute
+// agents' "-ours-" pattern. No "-b<n>" means box 1.
+var PRE_NAME_RE = /^(M-\d{8}-\d{6}-[0-9a-z]{6})(?:-b(\d{1,2}))?-pre-(slip|scale|length|breadth|height)-(\d{2})\.jpg$/;
 var KIND_COLS = {
   'label': 'Label', 'breadth': 'Breadth', 'length-height': 'Length-height', 'scale': 'Scale', 'boxes': 'Boxes',
   'length': 'Length', 'height': 'Height',
   'measure-scale': 'Measure weight', 'measure-length': 'Measure length', 'measure-breadth': 'Measure breadth', 'measure-height': 'Measure height',
 };
+var PRE_KIND_COLS = { slip: 'Slip photo', scale: 'Weight photo', length: 'Length photo', breadth: 'Breadth photo', height: 'Height photo' };
 // v1.4: every photo is kept at the camera's full resolution (the numbers are read from them); the Shipmozo agent
 // makes its own copies under Shipmozo's 2 MB limit when it uploads them. (Before v1.4 proof photos were cut to 2 MB.)
 function maxBytes_(kind) { return PP.MAX_READ_BYTES; }
@@ -131,8 +146,64 @@ var BOX_COLS = [
   // v1.4: one round after booking - weight ("Scale photo"), length, breadth, height, each with the label.
   ['Length photo', photoUrl_('length')], ['Height photo', photoUrl_('height')],
   ['Checks length', photoChecks_('length')], ['Checks height', photoChecks_('height')],
+  // v2: the booked order number (from the Pre-booking tab, or the label's own order barcode), the label-slip check
+  // (match / no match / skipped / overridden), flags for the supervisor, and the Pre-booking row it belongs to.
+  ['Order no.', function (s) { return s.stage === 'proof' ? s.order_no || '' : undefined; }],
+  ['Slip check', function (s) { return s.stage === 'proof' ? s.slip_check || '' : undefined; }],
+  ['Flags', function (s) { return s.stage === 'proof' ? (s.flags || []).join('; ') : undefined; }],
+  ['Pre-booking box', function (s) { return s.pre_box_id || undefined; }],
 ];
-var FILE_COLS = ['Uploaded', 'Test', 'AWB', 'Box', 'Kind', 'No.', 'File', 'Link', 'Bytes', 'Final when uploaded', 'Captured', 'Station', 'Phone', 'Upload ID'];
+
+// The Pre-booking tab (MEASURE, one row per box). The phone writes only its own columns; the batch read, the
+// booking and PROOF fill the rest (undefined = never written by the phone).
+function prePhotoUrl_(kind) {
+  return function (s) { var p = s.photos && s.photos[kind]; return p && p.url ? p.url : undefined; };
+}
+function preFiles_(key) {
+  return function (s) {
+    var out = [];
+    Object.keys(PRE_KIND_COLS).forEach(function (k) {
+      var p = s.photos && s.photos[k];
+      if (p && key === 'final' && p.final) out.push(p.final);
+      if (p && key === 'retakes' && p.retakes) out = out.concat(p.retakes);
+    });
+    return out.join(' | ');
+  };
+}
+// The phone's own statuses ("photos 3/5", "photos in", "kept aside ...", "cancelled ..."). Once the batch read or the
+// booking has moved a row on (read, re-shoot, ready to book, booked, proof done) the phone never writes it back.
+var PHONE_STATUS_RE = /^(photos\b.*|kept aside.*|cancelled.*)?$/;
+function none_() { return undefined; }
+var PRE_COLS = [
+  ['Box ID', function (s) { return s.box_id; }],
+  ['Record', function (s) { return s.record || s.shipment_id || ''; }],
+  ['Box', function (s) { return s.box; }],
+  ['Boxes', function (s) { return s.boxes; }],
+  ['Status', function (s, req, cur) { return PHONE_STATUS_RE.test(String(cur('Status') || '')) ? s.status || '' : undefined; }],
+  ['Station', function (s, req) { return s.station || req.station || ''; }],
+  ['Taken at', function (s) { return ist_(s.created_at); }],
+  ['Order no. (phone)', function (s) { return s.order_hint || undefined; }],   // a hint, never cleared
+  ['Slip photo', prePhotoUrl_('slip')], ['Weight photo', prePhotoUrl_('scale')], ['Length photo', prePhotoUrl_('length')],
+  ['Breadth photo', prePhotoUrl_('breadth')], ['Height photo', prePhotoUrl_('height')],
+  ['Checks', function (s) { return s.checks || ''; }],
+  ['Flags', function (s) { return (s.flags || []).join('; '); }],
+  // the batch read (Claude, from the photos)
+  ['Order no.', none_], ['Items', none_], ['Weight (kg)', none_], ['Length (cm)', none_], ['Breadth (cm)', none_], ['Height (cm)', none_],
+  ['Read notes', none_],
+  // the booking (operator now, Claude later)
+  ['Book weight (kg)', none_], ['Book L (cm)', none_], ['Book B (cm)', none_], ['Book H (cm)', none_],
+  ['AWB', none_], ['Box AWB', none_], ['Booked at', none_], ['Booked by', none_],
+  // set by the PROOF rows of this parcel (markProof_)
+  ['Proof status', none_], ['Proof row', none_],
+  ['Final files', preFiles_('final')], ['Retakes', preFiles_('retakes')],
+  ['Photos complete', function (s) { return ist_(s.completed_at); }],
+  ['Cancelled', function (s) { return s.cancelled || ''; }],
+  ['Last update', function () { return ist_(new Date().toISOString()); }],
+  ['Phone', function (s, req) { return req.phone || ''; }],
+  ['App', function (s, req) { return req.app || ''; }],
+  ['Team notes', none_],   // people type here; the script never writes it
+];
+var FILE_COLS = ['Uploaded', 'Test', 'AWB', 'Box', 'Kind', 'No.', 'File', 'Link', 'Bytes', 'Final when uploaded', 'Captured', 'Station', 'Phone', 'Upload ID', 'Record', 'Stage'];
 var LOG_COLS = ['Logged', 'Test', 'Station', 'Type', 'Reading', 'Result', 'Notes', 'Phone', 'App', 'Entry ID'];
 
 // ------------------------------------------------------------------ web app entry points
@@ -154,6 +225,7 @@ function doPost(e) {
   }
   try {
     if (req.action === 'ping') return reply_(ping_());
+    if (req.action === 'lookup') return reply_(lookup_(req));
     if (req.action === 'read') return reply_(read_(req));
     if (req.action === 'photo') return reply_(locked_(function () { return photo_(req); }));
     if (req.action === 'row') return reply_(locked_(function () { return rows_(req); }));
@@ -242,12 +314,57 @@ function bytesOk_(b) {
   return b.length > 3 && (b[0] & 0xff) === 0xff && (b[1] & 0xff) === 0xd8;
 }
 
+// Saves `bytes` as `name` in the folder chain `path` under `base` (each folder created if missing). The same upload
+// again is skipped; a different photo with a taken name is refused with the next free number of the same kind and
+// box (`re`: the name pattern, groups 2 = box, 3 = kind, 4 = number).
+function saveFile_(base, path, name, bytes, sha, req, re, meta0) {
+  var m = re.exec(name);
+  for (var attempt = 0; attempt < 2; attempt++) {
+    var chain = [];
+    try {
+      var parent = base;
+      path.forEach(function (p) { parent = folder_(parent, p); chain.push(parent); });
+      var same = list_("'" + q_(parent) + "' in parents and trashed = false", 'id,name,size,description');
+      var clash = same.filter(function (f) { return f.name === name; })[0];
+      if (clash) {
+        var meta = {};
+        try { meta = JSON.parse(clash.description || '{}'); } catch (e) { meta = {}; }
+        if (meta.upload_id === req.upload_id || meta.sha256 === sha) {
+          return { file: { id: clash.id, name: clash.name, size: Number(clash.size) }, skipped: true, folder: parent };
+        }
+        var next = 1;
+        same.forEach(function (f) {
+          var x = re.exec(f.name || '');
+          if (x && x[3] === m[3] && (x[2] || '') === (m[2] || '')) next = Math.max(next, Number(x[4]) + 1);
+        });
+        return { taken: { ok: false, code: 'name_taken', next_nn: next, error: name + ' already exists in Drive' } };
+      }
+      var desc = {};
+      Object.keys(meta0).forEach(function (k) { desc[k] = meta0[k]; });
+      desc.upload_id = req.upload_id; desc.sha256 = sha; desc.captured_at = req.captured_at; desc.station = req.station;
+      desc.phone = req.phone; desc.app = req.app; desc.kind = req.kind; desc.nn = Number(req.nn); desc.test = !!req.test;
+      var f = Drive.Files.create({ name: name, parents: [parent], mimeType: 'image/jpeg', description: JSON.stringify(desc) },
+        Utilities.newBlob(bytes, 'image/jpeg', name), { fields: 'id,name,size' });
+      return { file: { id: f.id, name: f.name, size: Number(f.size) || bytes.length }, skipped: false, folder: parent };
+    } catch (err) {
+      if (attempt) throw err;
+      // A cached folder may have been removed by hand: forget the chain and look it up again.
+      var cache = CacheService.getScriptCache(), up = base;
+      path.forEach(function (p, i) { cache.remove('f|' + up + '|' + p); up = chain[i] || up; });
+    }
+  }
+}
+
 function photo_(req) {
-  var name = String(req.name || ''), m = NAME_RE.exec(name);
+  var name = String(req.name || '');
+  if (req.stage === 'measure' || PRE_NAME_RE.test(name)) return prePhoto_(req);
+  var m = NAME_RE.exec(name);
   var boxes = Number(req.boxes) || 1;
   if (!m || m[1] !== String(req.awb || '') || m[3] !== req.kind || Number(m[4]) !== Number(req.nn)) return { ok: false, code: 'bad_name', error: name };
-  var multiNamed = !!m[2], multiWanted = boxes > 1 && req.kind !== 'boxes';
-  if (multiNamed !== multiWanted || (multiNamed && Number(m[2]) !== Number(req.box))) return { ok: false, code: 'bad_name', error: 'box number does not match: ' + name };
+  // "-b<n>" must match the box. A box-1 photo may carry no "-b": it was named before a supervisor added a box (v2),
+  // and "boxes" (all boxes in one photo) never has one.
+  var boxOk = m[2] ? req.kind !== 'boxes' && Number(m[2]) === Number(req.box) : req.kind === 'boxes' || Number(req.box) === 1 || boxes === 1;
+  if (!boxOk) return { ok: false, code: 'bad_name', error: 'box number does not match: ' + name };
   var month = /^20\d\d-(0[1-9]|1[0-2])$/.test(String(req.month || '')) ? req.month : Utilities.formatDate(new Date(), PP.TZ, 'yyyy-MM');
   var bytes = Utilities.base64Decode(String(req.jpeg_b64 || ''));
   if (!bytesOk_(bytes)) return { ok: false, code: 'bad_image', error: 'not a JPEG' };
@@ -256,53 +373,46 @@ function photo_(req) {
   if (req.sha256 && String(req.sha256).toLowerCase() !== sha) return { ok: false, code: 'bad_hash', error: 'the photo arrived damaged; resend' };
 
   var ids = ids_(), base = req.test ? ids.test : ids.root, awb = m[1];
-  var file = null, skipped = false, monthFolder = null, awbFolder = null;
-  for (var attempt = 0; attempt < 2 && !file; attempt++) {
-    try {
-      monthFolder = folder_(base, month);
-      awbFolder = folder_(monthFolder, awb);
-      var same = list_("'" + q_(awbFolder) + "' in parents and trashed = false", 'id,name,size,description');
-      var clash = same.filter(function (f) { return f.name === name; })[0];
-      if (clash) {
-        var meta = {};
-        try { meta = JSON.parse(clash.description || '{}'); } catch (e) { meta = {}; }
-        if (meta.upload_id === req.upload_id || meta.sha256 === sha) {
-          file = { id: clash.id, name: clash.name, size: Number(clash.size) }; skipped = true;
-        } else {
-          var next = 1;
-          same.forEach(function (f) {
-            var x = NAME_RE.exec(f.name || '');
-            if (x && x[3] === m[3] && (x[2] || '') === (m[2] || '')) next = Math.max(next, Number(x[4]) + 1);
-          });
-          return { ok: false, code: 'name_taken', next_nn: next, error: name + ' already exists in Drive' };
-        }
-      } else {
-        var desc = JSON.stringify({
-          upload_id: req.upload_id, sha256: sha, captured_at: req.captured_at, station: req.station, phone: req.phone, app: req.app,
-          awb: awb, box: req.box, boxes: boxes, kind: req.kind, nn: Number(req.nn), test: !!req.test,
-        });
-        var f = Drive.Files.create({ name: name, parents: [awbFolder], mimeType: 'image/jpeg', description: desc },
-          Utilities.newBlob(bytes, 'image/jpeg', name), { fields: 'id,name,size' });
-        file = { id: f.id, name: f.name, size: Number(f.size) || bytes.length };
-      }
-    } catch (err) {
-      if (attempt) throw err;
-      // A cached folder may have been removed by hand: forget it and look it up again.
-      var cache = CacheService.getScriptCache();
-      cache.remove('f|' + base + '|' + month);
-      if (monthFolder) cache.remove('f|' + monthFolder + '|' + awb);
-      monthFolder = null; awbFolder = null;
-    }
-  }
+  var saved = saveFile_(base, [month, awb], name, bytes, sha, req, NAME_RE, { awb: awb, box: req.box, boxes: boxes });
+  if (saved.taken) return saved.taken;
+  var file = saved.file;
   file.url = fileUrl_(file.id);
-
-  if (!skipped) {
+  if (!saved.skipped) {
     appendRow_(ids.sheet, PP.TAB_FILES, FILE_COLS, [ist_(new Date().toISOString()), req.test ? 'TEST' : '', awb, req.box || '', req.kind,
-      Number(req.nn), name, file.url, file.size, req.final ? 'yes' : 'no', ist_(req.captured_at), req.station || '', req.phone || '', req.upload_id || '']);
+      Number(req.nn), name, file.url, file.size, req.final ? 'yes' : 'no', ist_(req.captured_at), req.station || '', req.phone || '', req.upload_id || '',
+      req.record || '', 'proof']);
   }
   var link = { kind: req.kind, url: file.url, final: !!req.final };
-  var n = upsertRows_(ids.sheet, req.test ? PP.TAB_TEST : PP.TAB_LIVE, req.rows || [], req, link);
-  return { ok: true, skipped: skipped, file: file, folder: { id: awbFolder, url: folderUrl_(awbFolder) }, rows: n };
+  var n = proofRows_(ids.sheet, !!req.test, req.rows || [], req, link);
+  return { ok: true, skipped: saved.skipped, file: file, folder: { id: saved.folder, url: folderUrl_(saved.folder) }, rows: n };
+}
+
+// MEASURE photos: Packing Proof/[TEST/]Pre-booking/<YYYY-MM>/<YYYY-MM-DD>/<record>/
+function prePhoto_(req) {
+  var name = String(req.name || ''), m = PRE_NAME_RE.exec(name);
+  if (!m || m[1] !== String(req.record || '') || m[3] !== req.kind || Number(m[4]) !== Number(req.nn)) return { ok: false, code: 'bad_name', error: name };
+  if (m[2] ? Number(m[2]) !== Number(req.box) : Number(req.box) !== 1) return { ok: false, code: 'bad_name', error: 'box number does not match: ' + name };
+  var day = /^20\d\d-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/.test(String(req.day || '')) ? req.day : Utilities.formatDate(new Date(), PP.TZ, 'yyyy-MM-dd');
+  var bytes = Utilities.base64Decode(String(req.jpeg_b64 || ''));
+  if (!bytesOk_(bytes)) return { ok: false, code: 'bad_image', error: 'not a JPEG' };
+  if (bytes.length > maxBytes_(req.kind)) return { ok: false, code: 'too_big', error: bytes.length + ' bytes' };
+  var sha = hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes));
+  if (req.sha256 && String(req.sha256).toLowerCase() !== sha) return { ok: false, code: 'bad_hash', error: 'the photo arrived damaged; resend' };
+
+  var ids = ids_(), base = req.test ? ids.test : ids.root, record = m[1];
+  var saved = saveFile_(base, [PP.PRE_FOLDER, day.slice(0, 7), day, record], name, bytes, sha, req, PRE_NAME_RE,
+    { record: record, box: Number(req.box), boxes: Number(req.boxes) || 1, stage: 'measure' });
+  if (saved.taken) return saved.taken;
+  var file = saved.file;
+  file.url = fileUrl_(file.id);
+  if (!saved.skipped) {
+    appendRow_(ids.sheet, PP.TAB_FILES, FILE_COLS, [ist_(new Date().toISOString()), req.test ? 'TEST' : '', '', req.box || '', req.kind,
+      Number(req.nn), name, file.url, file.size, req.final ? 'yes' : 'no', ist_(req.captured_at), req.station || '', req.phone || '', req.upload_id || '',
+      record, 'measure']);
+  }
+  var link = { header: PRE_KIND_COLS[req.kind], url: file.url, final: !!req.final };
+  var rows = upsert_(ids.sheet, req.test ? PP.TAB_PRE_TEST : PP.TAB_PRE, PRE_COLS, req.rows || [], req, link);
+  return { ok: true, skipped: saved.skipped, file: file, folder: { id: saved.folder, url: folderUrl_(saved.folder) }, rows: rows.length };
 }
 
 // ------------------------------------------------------------------ Sheet
@@ -362,10 +472,13 @@ function appendRow_(sheetId, tab, headers, row) {
 }
 
 // One row per box, keyed by Box ID. Cells the snapshot does not know keep their value; "Team notes" is never written.
-function upsertRows_(sheetId, tab, rows, req, link) {
-  if (!rows.length) return 0;
-  var top = ensureTab_(sheetId, tab, BOX_COLS.map(function (c) { return c[0]; }));
-  var idCol = col_(top.indexOf('Box ID') + 1), last = col_(top.length);
+// Each column's function gets (snapshot, request, cur) where cur(header) is the cell's value before this write.
+// `link` {header, url, final}: the just-uploaded photo's link, written straight into its photo column when final.
+// Returns [{box_id, row}] (row = the Sheet row number).
+function upsert_(sheetId, tab, cols, rows, req, link) {
+  if (!rows.length) return [];
+  var top = ensureTab_(sheetId, tab, cols.map(function (c) { return c[0]; }));
+  var idCol = col_(top.indexOf('Box ID') + 1), last = col_(top.length), out = [];
   var ids = (Sheets.Spreadsheets.Values.get(sheetId, a1Tab_(tab, idCol + ':' + idCol)).values || []).map(function (r) { return r[0]; });
   rows.forEach(function (snap) {
     if (!snap || !snap.box_id) return;
@@ -373,9 +486,11 @@ function upsertRows_(sheetId, tab, rows, req, link) {
     var cur = at > 0 ? ((Sheets.Spreadsheets.Values.get(sheetId, a1Tab_(tab, 'A' + (at + 1) + ':' + last + (at + 1)), { valueRenderOption: 'UNFORMATTED_VALUE' }).values || [[]])[0] || []) : [];
     // Start from the row as it is (columns we do not own - Team notes, anything added by hand - are kept).
     var row = top.map(function (h, i) { return cur[i] === undefined ? '' : cur[i]; });
-    BOX_COLS.forEach(function (c) {
-      var v = c[1](snap, req);
-      if (link && link.final && c[0] === KIND_COLS[link.kind] + ' photo') v = link.url;
+    var before = function (h) { var i = top.indexOf(h); return i < 0 ? '' : row[i]; };
+    var vals = cols.map(function (c) { return c[1](snap, req, before); });
+    cols.forEach(function (c, i) {
+      var v = vals[i];
+      if (link && link.final && c[0] === link.header) v = link.url;
       if (v !== undefined) row[top.indexOf(c[0])] = v;
     });
     if (at > 0) {
@@ -383,14 +498,154 @@ function upsertRows_(sheetId, tab, rows, req, link) {
     } else {
       Sheets.Spreadsheets.Values.append({ values: [row] }, sheetId, a1Tab_(tab, 'A1'), { valueInputOption: 'RAW', insertDataOption: 'INSERT_ROWS' });
       ids.push(snap.box_id);
+      at = ids.length - 1;
     }
+    out.push({ box_id: snap.box_id, row: at + 1 });
   });
-  return rows.length;
+  return out;
+}
+
+// PROOF rows ("Boxes" / "TEST boxes"), then the Pre-booking row each one belongs to.
+function proofRows_(sheetId, test, rows, req, link) {
+  var tab = test ? PP.TAB_TEST : PP.TAB_LIVE;
+  var at = upsert_(sheetId, tab, BOX_COLS, rows, req, link ? { header: KIND_COLS[link.kind] + ' photo', url: link.url, final: link.final } : null);
+  at.forEach(function (x, i) {
+    var snap = rows.filter(function (r) { return r && r.box_id === x.box_id; })[0];
+    if (snap && snap.awb && !snap.cancelled) markProof_(sheetId, test, snap, tab, x.row);
+  });
+  return at.length;
 }
 
 function rows_(req) {
-  var ids = ids_();
-  return { ok: true, rows: upsertRows_(ids.sheet, req.test ? PP.TAB_TEST : PP.TAB_LIVE, req.rows || [], req, null) };
+  var ids = ids_(), all = req.rows || [], test = !!req.test;
+  var pre = all.filter(function (r) { return r && r.stage === 'measure'; }), proof = all.filter(function (r) { return r && r.stage !== 'measure'; });
+  var n = upsert_(ids.sheet, test ? PP.TAB_PRE_TEST : PP.TAB_PRE, PRE_COLS, pre, req, null).length;
+  n += proofRows_(ids.sheet, test, proof, req, null);
+  return { ok: true, rows: n };
+}
+
+// ------------------------------------------------------------------ Pre-booking: lookup and proof marking
+// The whole tab as {top: headers, rows: [[...]], at: [sheet row numbers]}; get(row, header) reads one cell as text.
+function readTab_(sheetId, tab, headers) {
+  var top = ensureTab_(sheetId, tab, headers);
+  var vals = Sheets.Spreadsheets.Values.get(sheetId, a1Tab_(tab, 'A:' + col_(top.length)), { valueRenderOption: 'UNFORMATTED_VALUE' }).values || [];
+  return { top: top, rows: vals.slice(1), get: function (row, h) { var i = top.indexOf(h); return i < 0 || row[i] === undefined || row[i] === null ? '' : String(row[i]).trim(); } };
+}
+function normCode_(v) { return String(v == null ? '' : v).replace(/\s+/g, '').toUpperCase(); }
+// "TFC-001512345", "#TFC-001512345", "tfc 1512345", "1512345" -> "TFC-001512345"; anything else -> ""
+function normOrder_(v) {
+  var t = String(v == null ? '' : v).toUpperCase().replace(/[#\s]/g, '').replace(/^ORDER/, '');
+  var m = /^(?:TFC)?-?0*(\d{1,9})$/.exec(t);
+  if (!m) return '';
+  var d = m[1];
+  while (d.length < 9) d = '0' + d;
+  return 'TFC-' + d;
+}
+
+// by AWB:   {found, booked, awb (the order's AWB), order, boxes: [{n, box_id, record, box, box_awb, proof_status}], box_of_code}
+// by order: {order, measured: [{record, box, box_id, taken_at}] (other records only), booked, awb}
+// Cancelled rows never count.
+function lookup_(req) {
+  var ids = ids_(), tab = req.test ? PP.TAB_PRE_TEST : PP.TAB_PRE;
+  var t = readTab_(ids.sheet, tab, PRE_COLS.map(function (c) { return c[0]; }));
+  var live = t.rows.filter(function (r) { return t.get(r, 'Box ID') && !t.get(r, 'Cancelled'); });
+  if (req.by === 'awb') {
+    var code = normCode_(req.awb);
+    if (!code) return { ok: false, code: 'bad_request', error: 'no AWB' };
+    var hit = live.filter(function (r) { return normCode_(t.get(r, 'AWB')) === code || normCode_(t.get(r, 'Box AWB')) === code; });
+    if (!hit.length) return { ok: true, by: 'awb', code: code, found: false, booked: false };
+    var master = normCode_(t.get(hit[0], 'AWB')) || code;
+    var mine = live.filter(function (r) {
+      return (normCode_(t.get(r, 'AWB')) || normCode_(t.get(r, 'Box AWB'))) === master || normCode_(t.get(r, 'Box AWB')) === code;
+    });
+    mine.sort(function (a, b) {
+      var ra = t.get(a, 'Record'), rb = t.get(b, 'Record');
+      return ra === rb ? Number(t.get(a, 'Box')) - Number(t.get(b, 'Box')) : ra < rb ? -1 : 1;
+    });
+    var order = '';
+    mine.forEach(function (r) { order = order || normOrder_(t.get(r, 'Order no.')) || normOrder_(t.get(r, 'Order no. (phone)')); });
+    var boxes = mine.map(function (r, i) {
+      return { n: i + 1, box_id: t.get(r, 'Box ID'), record: t.get(r, 'Record'), box: Number(t.get(r, 'Box')) || i + 1,
+        box_awb: normCode_(t.get(r, 'Box AWB')), proof_status: t.get(r, 'Proof status') };
+    });
+    var own = boxes.filter(function (b) { return b.box_awb && b.box_awb === code && b.box_awb !== master; })[0];
+    return { ok: true, by: 'awb', code: code, found: true, booked: true, awb: master, order: order, boxes: boxes, box_of_code: own ? own.n : 0 };
+  }
+  if (req.by === 'order') {
+    var want = normOrder_(req.order);
+    if (!want) return { ok: false, code: 'bad_request', error: 'not an order number: ' + req.order };
+    var rows = live.filter(function (r) { return normOrder_(t.get(r, 'Order no.')) === want || normOrder_(t.get(r, 'Order no. (phone)')) === want; });
+    var others = rows.filter(function (r) { return t.get(r, 'Record') !== String(req.record || ''); });
+    var booked = rows.filter(function (r) { return t.get(r, 'AWB'); });
+    return {
+      ok: true, by: 'order', order: want, booked: booked.length > 0, awb: booked.length ? normCode_(t.get(booked[0], 'AWB')) : '',
+      measured: others.map(function (r) { return { record: t.get(r, 'Record'), box: Number(t.get(r, 'Box')) || 1, box_id: t.get(r, 'Box ID'), taken_at: t.get(r, 'Taken at') }; }),
+    };
+  }
+  return { ok: false, code: 'bad_request', error: 'lookup by "awb" or "order"' };
+}
+
+// done: the box's proof set is complete and the label-slip check passed (or was overridden / could not run);
+// mismatch: the check failed (kept aside); missing: proof started, photos still missing.
+function proofStatus_(s) {
+  if (s.slip_check === 'no match') return 'mismatch';
+  return s.status === 'complete' ? 'done' : 'missing';
+}
+
+// The tab's gid (for links to a row), cached for 6 hours.
+function gid_(sheetId, tab) {
+  var cache = CacheService.getScriptCache(), ck = 'g|' + sheetId + '|' + tab, hit = cache.get(ck);
+  if (hit) return hit;
+  var meta = Sheets.Spreadsheets.get(sheetId, { fields: 'sheets.properties(sheetId,title)' });
+  var p = (meta.sheets || []).map(function (s) { return s.properties; }).filter(function (x) { return x.title === tab; })[0];
+  var g = p ? String(p.sheetId) : '0';
+  cache.put(ck, g, 21600);
+  return g;
+}
+
+// Sets "Proof status" and "Proof row" on the Pre-booking row of this PROOF box (and Status "proof done" when done).
+// The row: the one the phone looked up (pre_box_id); else the one whose Box AWB is this box's own label code; else
+// the row of this AWB with this box number (an AWB pasted after the proof started). Returns its Box ID or ''.
+function markProof_(sheetId, test, snap, proofTab, proofRow) {
+  var tab = test ? PP.TAB_PRE_TEST : PP.TAB_PRE;
+  var t = readTab_(sheetId, tab, PRE_COLS.map(function (c) { return c[0]; }));
+  var live = t.rows.map(function (r, i) { return { r: r, at: i + 2 }; }).filter(function (x) { return t.get(x.r, 'Box ID') && !t.get(x.r, 'Cancelled'); });
+  var awb = normCode_(snap.awb), code = normCode_(snap.box_code), hit = null;
+  if (snap.pre_box_id) hit = live.filter(function (x) { return t.get(x.r, 'Box ID') === snap.pre_box_id; })[0];
+  if (!hit && code && code !== awb) hit = live.filter(function (x) { return normCode_(t.get(x.r, 'Box AWB')) === code; })[0];
+  if (!hit) {
+    var same = live.filter(function (x) { return normCode_(t.get(x.r, 'AWB')) === awb; });
+    hit = same.length === 1 && Number(snap.box) === 1 ? same[0]
+      : same.filter(function (x) { return Number(t.get(x.r, 'Box')) === Number(snap.box); })[0] || same[Number(snap.box) - 1] || null;
+  }
+  if (!hit) return '';
+  var status = proofStatus_(snap), top = t.top, row = top.map(function (h, i) { return hit.r[i] === undefined || hit.r[i] === null ? '' : hit.r[i]; });
+  row[top.indexOf('Proof status')] = status;
+  row[top.indexOf('Proof row')] = sheetUrl_(sheetId) + '/edit#gid=' + gid_(sheetId, proofTab) + '&range=A' + proofRow;
+  var si = top.indexOf('Status');
+  if (status === 'done') row[si] = 'proof done';
+  else if (String(row[si]) === 'proof done') row[si] = 'booked';   // a proof that is no longer done (e.g. re-taken)
+  Sheets.Spreadsheets.Values.update({ values: [row] }, sheetId, a1Tab_(tab, 'A' + hit.at), { valueInputOption: 'RAW' });
+  return t.get(hit.r, 'Box ID');
+}
+
+// "Check before pickup": a tab of formulas over the Pre-booking tab - every row with an AWB whose proof is not
+// "done". Written by setup() with the columns where they stand; moving columns later keeps the formula pointing
+// at them (Sheets adjusts references). Run setup() again after adding columns at the end.
+function ensureCheckTab_(sheetId, tab, preTab) {
+  var top = ensureTab_(sheetId, preTab, PRE_COLS.map(function (c) { return c[0]; }));
+  ensureTab_(sheetId, tab, []);
+  var q = "'" + preTab.replace(/'/g, "''") + "'!", last = col_(top.length);
+  var awb = col_(top.indexOf('AWB') + 1), ps = col_(top.indexOf('Proof status') + 1);
+  var f1 = '={' + q + 'A1:' + last + '1}';
+  var f2 = '=IFERROR(FILTER(' + q + 'A2:' + last + ', ' + q + awb + '2:' + awb + '<>"", ' + q + ps + '2:' + ps + '<>"done"), "")';
+  Sheets.Spreadsheets.Values.update({ values: [[f1], [f2]] }, sheetId, a1Tab_(tab, 'A1:A2'), { valueInputOption: 'USER_ENTERED' });
+  var g = Number(gid_(sheetId, tab));
+  Sheets.Spreadsheets.batchUpdate({ requests: [
+    { updateSheetProperties: { properties: { sheetId: g, gridProperties: { frozenRowCount: 1 } }, fields: 'gridProperties.frozenRowCount' } },
+    { repeatCell: { range: { sheetId: g, startRowIndex: 0, endRowIndex: 1 }, cell: { userEnteredFormat: { textFormat: { bold: true } } }, fields: 'userEnteredFormat.textFormat.bold' } },
+  ] }, sheetId);
+  return { f1: f1, f2: f2 };
 }
 
 function log_(req) {
@@ -407,7 +662,8 @@ function ping_() {
     root: { id: ids.root, name: PP.ROOT_NAME, url: folderUrl_(ids.root) },
     test: { id: ids.test, url: folderUrl_(ids.test) },
     sheet: { id: ids.sheet, url: sheetUrl_(ids.sheet) },
-    reader: !!props_().getProperty('ANTHROPIC_API_KEY'),   // false: the phone leaves the numbers to be read later
+    reader: !!props_().getProperty('ANTHROPIC_API_KEY'),   // v1.1-1.3 only; v2 phones never read in the app
+    stages: true,                                           // v2: Pre-booking tab, lookup, -pre- photos
   };
 }
 
@@ -576,28 +832,52 @@ function read_(req) {
 }
 
 // ------------------------------------------------------------------ self-test (run from the editor after setup)
-// Saves a tiny TEST photo through the same code as a phone upload (no station key: the editor runs as the owner):
-// Packing Proof/TEST/<month>/SELFTEST000001/SELFTEST000001-ours-measure-length-NN.jpg, a "Files" row and a
-// "TEST boxes" row (Box ID SELFTEST-b1). Run again, it finds the same photo already there ("skipped": true), as a
-// repeated phone upload would. Nothing outside TEST.
+// Through the same code as a phone upload (no station key: the editor runs as the owner), TEST only:
+//  - PROOF:   Packing Proof/TEST/<month>/SELFTEST000001/SELFTEST000001-ours-label-NN.jpg, a "Files" row and a
+//             "TEST boxes" row (Box ID SELFTEST-b1);
+//  - MEASURE: Packing Proof/TEST/Pre-booking/<month>/<day>/M-00000000-000000-selfte/...-pre-slip-NN.jpg and a
+//             "TEST pre-booking" row (Box ID M-00000000-000000-selfte-b1, Order no. (phone) TFC-000000000);
+//  - lookup by that order number and by an AWB that is not in the tab;
+//  - the "Check before pickup" tabs exist.
+// Run again, it finds the same photos already there ("skipped": true), as a repeated phone upload would.
 var SELFTEST_JPEG = '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAoHBwgHBgoICAgLCgoLDhgQDg0NDh0VFhEYIx8lJCIfIiEmKzcvJik0KSEiMEExNDk7Pj4+JS5ESUM8SDc9Pjv/2wBDAQoLCw4NDhwQEBw7KCIoOzs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozs7Ozv/wAARCABAAGADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDoaKKoX17eWt1bRQ2sMq3MnlqzzlCDsZuQEPGFPevFSuei3Yv0VmQ6pdPa3F3JZxiCAzDEcxeRvLZl4XaByV9e9RSazcrpdxfx2ltMkEZl3R3WUdQpPysF68dCPTmq5WLmRsUVHA0zR5uI443z92Ny4/MgfyqSpGFFFFAwooooAKKKKACq9za/aJ7SXft+zTGXGM7so6Y9vv5/CrFFAjIttEe2kuGjmt0aZ5W85LbEy72Lff3HOM+nanHRWktdRjlnjEt/D5TNFDsUcMN23ccn5uTnnA9K1aKrnYuVBRRRUlBRRRQAUUUUAFFFFABRRXnP/CvNX/5+LL/vt/8A4mtIRjLd2IlJrZXPRqK85/4V5q//AD8WX/fb/wDxNH/CvNX/AOfiy/77f/4mtPZU/wCcjnl/KejUV5z/AMK81f8A5+LL/vt//iaP+Feav/z8WX/fb/8AxNHsqf8AOHPL+U9Gorzn/hXmr/8APxZf99v/APE0f8K81f8A5+LL/vt//iaPZU/5w55fyno1Fec/8K81f/n4sv8Avt//AImj/hXmr/8APxZf99v/APE0eyp/zhzy/lPRqK85/wCFeav/AM/Fl/32/wD8TXe6dbvZ6Za2shUvDCkbFehIUA4rOcIx2lcuMm91Ys0UUVmWFFFFABRRRQAUUUUAFFFFABRRRQB//9k=';
 function selfTest() {
-  var awb = 'SELFTEST000001', kind = 'measure-length', bytes = Utilities.base64Decode(SELFTEST_JPEG), now = new Date().toISOString();
-  var month = Utilities.formatDate(new Date(), PP.TZ, 'yyyy-MM'), r = null;
-  var row = { box_id: 'SELFTEST-b1', shipment_id: 'SELFTEST', awb: awb, box: 1, boxes: 1, status: 'self-test', order_ref: '',
-    readings: {}, book: {}, photos: {}, created_at: now, station: 'Self-test (editor)', readings_source: '', reread: '' };
-  for (var nn = 1; nn < 50; nn++) {
-    r = photo_({
-      v: 1, action: 'photo', test: true, station: 'Self-test (editor)', phone: 'editor', app: 'selfTest ' + PP.VERSION,
-      upload_id: Utilities.getUuid(), name: awb + '-ours-' + kind + '-' + (nn < 10 ? '0' : '') + nn + '.jpg', awb: awb, month: month,
-      box: 1, boxes: 1, kind: kind, nn: nn, final: true, captured_at: now, bytes: bytes.length,
-      sha256: hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes)), jpeg_b64: SELFTEST_JPEG, rows: [row],
-    });
-    if (!r || r.code !== 'name_taken') break;   // an earlier self-test used this number
-  }
-  console.log('Self-test: ' + JSON.stringify(r));
-  console.log('Open the Sheet: ' + sheetUrl_(ids_().sheet) + ' (tab "TEST boxes", Box ID SELFTEST-b1; tab "Files")');
-  return r;
+  var awb = 'SELFTEST000001', bytes = Utilities.base64Decode(SELFTEST_JPEG), now = new Date().toISOString();
+  var month = Utilities.formatDate(new Date(), PP.TZ, 'yyyy-MM'), day = Utilities.formatDate(new Date(), PP.TZ, 'yyyy-MM-dd');
+  var sha = hex_(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, bytes));
+  var base = { v: 1, action: 'photo', test: true, station: 'Self-test (editor)', phone: 'editor', app: 'selfTest ' + PP.VERSION,
+    box: 1, boxes: 1, final: true, captured_at: now, bytes: bytes.length, sha256: sha, jpeg_b64: SELFTEST_JPEG };
+  var upload = function (extra, nameOf) {
+    var r = null;
+    for (var nn = 1; nn < 50; nn++) {
+      var req = { upload_id: Utilities.getUuid(), nn: nn, name: nameOf(nn < 10 ? '0' + nn : String(nn)) };
+      Object.keys(base).forEach(function (k) { req[k] = base[k]; });
+      Object.keys(extra).forEach(function (k) { req[k] = extra[k]; });
+      r = photo_(req);
+      if (!r || r.code !== 'name_taken') break;   // an earlier self-test used this number
+    }
+    return r;
+  };
+  var proofRow = { stage: 'proof', box_id: 'SELFTEST-b1', shipment_id: 'SELFTEST', awb: awb, box: 1, boxes: 1, status: 'self-test', order_ref: '',
+    order_no: '', slip_check: 'skipped', flags: ['self-test'], readings: {}, book: {}, photos: {}, created_at: now, station: 'Self-test (editor)' };
+  var proof = upload({ awb: awb, month: month, kind: 'label', rows: [proofRow] }, function (nn) { return awb + '-ours-label-' + nn + '.jpg'; });
+  var record = 'M-00000000-000000-selfte';
+  var preRow = { stage: 'measure', box_id: record + '-b1', record: record, box: 1, boxes: 1, status: 'photos 1/5', station: 'Self-test (editor)',
+    created_at: now, order_hint: 'TFC-000000000', photos: {}, checks: 'self-test', flags: ['self-test'] };
+  var pre = upload({ stage: 'measure', record: record, day: day, kind: 'slip', rows: [preRow] }, function (nn) { return record + '-pre-slip-' + nn + '.jpg'; });
+  var ids = ids_();
+  var titles = (Sheets.Spreadsheets.get(ids.sheet, { fields: 'sheets.properties(title)' }).sheets || []).map(function (s) { return s.properties.title; });
+  var out = {
+    proof: proof, pre: pre,
+    lookup_order: lookup_({ test: true, by: 'order', order: 'TFC-000000000' }),
+    lookup_awb: lookup_({ test: true, by: 'awb', awb: 'SELFTEST999999' }),
+    check_tabs: titles.indexOf(PP.TAB_CHECK) >= 0 && titles.indexOf(PP.TAB_CHECK_TEST) >= 0,
+  };
+  out.ok = !!(proof && proof.ok && pre && pre.ok && out.lookup_order.ok && out.lookup_order.measured.length && out.lookup_awb.ok &&
+    !out.lookup_awb.found && out.check_tabs);
+  console.log('Self-test: ' + JSON.stringify(out));
+  console.log('Open the Sheet: ' + sheetUrl_(ids.sheet) + ' (tabs "TEST boxes" Box ID SELFTEST-b1, "TEST pre-booking" Box ID ' + record + '-b1, "Files")');
+  return out;
 }
 
 // ------------------------------------------------------------------ one-time setup (run from the editor)
@@ -619,6 +899,9 @@ function setup() {
   ensureTab_(sheet, PP.TAB_TEST, headers);
   ensureTab_(sheet, PP.TAB_FILES, FILE_COLS);
   ensureTab_(sheet, PP.TAB_LOG, LOG_COLS);
+  // v2: the before-booking tabs and the "Check before pickup" lists over them (rewritten with every run).
+  ensureCheckTab_(sheet, PP.TAB_CHECK, PP.TAB_PRE);
+  ensureCheckTab_(sheet, PP.TAB_CHECK_TEST, PP.TAB_PRE_TEST);
   console.log('Packing Proof folder: ' + folderUrl_(root));
   console.log('TEST folder:          ' + folderUrl_(p.getProperty('TEST_ID')));
   console.log('Sheet:                ' + sheetUrl_(sheet));
