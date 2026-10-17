@@ -3,8 +3,8 @@
 // Wire format: POST, Content-Type text/plain (no CORS pre-flight), body = JSON. The reply is JSON.
 import * as db from './store.js';
 import { APP_VERSION } from './config.js';
-import { rowSnapshot, nextNn, listFor, upgradeBox } from './records.js';
-import { photoName, isoLocal } from './logic.js';
+import { rowSnapshot, nextNn, listFor, upgradeBox, stageOf } from './records.js';
+import { photoName, prePhotoName, isoLocal } from './logic.js';
 
 export function blobToBase64(blob) {
   return new Promise((res, rej) => {
@@ -136,9 +136,13 @@ export class Uploader {
     const b = p.box_id ? boxes.find((x) => x.id === p.box_id) : null;
     const list = listFor(s, b, p.kind);
     const rows = (p.kind === 'boxes' ? boxes : [b]).map((x) => rowSnapshot(s, x, byId));
+    const measure = stageOf(s) === 'measure';
     this.state.sending = p.name; this.report();
+    // MEASURE photos are named by record and filed by day; PROOF photos by AWB and month (the month the record
+    // started, so an order's photos stay together).
     const payload = {
-      ...this.base(st, s.test), action: 'photo', upload_id: p.id, name: p.name, awb: s.awb, month: s.month,
+      ...this.base(st, s.test), action: 'photo', upload_id: p.id, name: p.name, stage: measure ? 'measure' : 'proof', record: s.id,
+      awb: measure ? '' : s.awb, month: s.month || (s.awb_at || s.created_at || '').slice(0, 7), day: s.day || (s.created_at || '').slice(0, 10),
       box: p.box_n, boxes: s.boxes.length, kind: p.kind, nn: p.nn, final: list[list.length - 1] === p.id,
       captured_at: p.captured_at, bytes: p.blob.size, sha256: await sha256Hex(p.blob),
       jpeg_b64: await blobToBase64(p.blob), rows,
@@ -154,7 +158,7 @@ export class Uploader {
       const nn = Math.max(nextNn(list, byId), p.nn + 1, (r.next_nn || 0));
       if (nn > 99) { await this.fail(item, 'No free photo number left for ' + p.name); return 'retry'; }
       p.nn = nn;
-      p.name = photoName({ awb: s.awb, box: p.box_n, boxes: s.boxes.length, kind: p.kind, nn });
+      p.name = measure ? prePhotoName({ record: s.id, box: p.box_n, kind: p.kind, nn }) : photoName({ awb: s.awb, box: p.box_n, boxes: s.boxes.length, kind: p.kind, nn });
       await db.put('photos', p);
       return 'retry-now';
     }

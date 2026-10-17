@@ -1,6 +1,7 @@
-// Demo camera for testing on a computer (Settings > Demo camera, or ?demo=1). It draws a fake station:
-// a label with a real Code 128 barcode, the bay with printed scales, the platform scale. It shakes and blurs
-// for a moment after every change so the steady/sharp checks are exercised. Never used on the station phone.
+// Demo camera for testing on a computer (?demo=1): it draws a pretend photo at phone resolution instead of opening
+// the camera app. Everything on it is made up - the slip, the order number, the label, the AWB, the address.
+// The browser tests use the same drawings (blurred and tilted) for the order-number reader.
+// Never used on the station phone.
 
 const C128 = ['212222', '222122', '222221', '121223', '121322', '131222', '122213', '122312', '132212', '221213', '221312', '231212', '112232', '122132', '122231', '113222', '123122', '123221', '223211', '221132', '221231', '213212', '223112', '312131', '311222', '321122', '321221', '312212', '322112', '322211', '212123', '212321', '232121', '111323', '131123', '131321', '112313', '132113', '132311', '211313', '231113', '231311', '112133', '112331', '132131', '113123', '113321', '133121', '313121', '211331', '231131', '213113', '213311', '213131', '311123', '311321', '331121', '312113', '312311', '332111', '314111', '221411', '431111', '111224', '111422', '121124', '121421', '141122', '141221', '112214', '112412', '122114', '122411', '142112', '142211', '241211', '221114', '413111', '241112', '134111', '111242', '121142', '121241', '114212', '124112', '124211', '411212', '421112', '421211', '212141', '214121', '412121', '111143', '111341', '131141', '114113', '114311', '411113', '411311', '113141', '114131', '311141', '411131', '211412', '211214', '211232', '2331112'];
 
@@ -24,202 +25,201 @@ export function code128(text) {
   return codes.map((c) => C128[c]).join('');
 }
 
-function drawBarcode(ctx, text, cx, y, maxW, h, minModule) {
-  const widths = code128(text);
-  const total = [...widths].reduce((a, c) => a + Number(c), 0);
-  const m = Math.max(minModule, Math.floor(maxW / (total + 20)));
-  let x = Math.round(cx - (total * m) / 2), bar = true;
-  ctx.fillStyle = '#000';
-  for (const c of widths) {
-    const w = Number(c) * m;
-    if (bar) ctx.fillRect(x, y, w, h);
-    x += w; bar = !bar;
-  }
-  return total * m;
+// EAN-13 (a product barcode) as a string of modules, 1 = bar. `digits`: 12 digits, the check digit is added.
+const EAN_L = ['0001101', '0011001', '0010011', '0111101', '0100011', '0110001', '0101111', '0111011', '0110111', '0001011'];
+const EAN_G = ['0100111', '0110011', '0011011', '0100001', '0011101', '0111001', '0000101', '0010001', '0001001', '0010111'];
+const EAN_R = ['1110010', '1100110', '1101100', '1000010', '1011100', '1001110', '1010000', '1000100', '1001000', '1110100'];
+const EAN_P = ['LLLLLL', 'LLGLGG', 'LLGGLG', 'LLGGGL', 'LGLLGG', 'LGGLLG', 'LGGGLL', 'LGLGLG', 'LGLGGL', 'LGGLGL'];
+export function ean13(digits) {
+  const d = String(digits).slice(0, 12).split('').map(Number);
+  const sum = d.reduce((a, x, i) => a + x * (i % 2 ? 3 : 1), 0);
+  d.push((10 - (sum % 10)) % 10);
+  let m = '101';
+  for (let i = 1; i <= 6; i++) m += (EAN_P[d[0]][i - 1] === 'L' ? EAN_L : EAN_G)[d[i]];
+  m += '01010';
+  for (let i = 7; i <= 12; i++) m += EAN_R[d[i]];
+  return { modules: m + '101', text: d.join('') };
 }
 
-function noise(ctx, W, H, seed, alpha) {
+function drawCode128(ctx, text, x, y, maxW, h) {
+  const widths = code128(text);
+  const total = [...widths].reduce((a, c) => a + Number(c), 0);
+  const m = Math.max(2, Math.floor(maxW / total));
+  let cx = Math.round(x + (maxW - total * m) / 2), bar = true;
+  ctx.fillStyle = '#000';
+  for (const c of widths) { const w = Number(c) * m; if (bar) ctx.fillRect(cx, y, w, h); cx += w; bar = !bar; }
+}
+function drawEan13(ctx, digits, x, y, maxW, h) {
+  const { modules, text } = ean13(digits), m = Math.max(2, Math.floor(maxW / (modules.length + 18)));
+  ctx.fillStyle = '#fff'; ctx.fillRect(x - 9 * m, y - 4 * m, (modules.length + 18) * m, h + 20 * m);
+  ctx.fillStyle = '#000';
+  [...modules].forEach((b, i) => { if (b === '1') ctx.fillRect(x + i * m, y, m, h); });
+  ctx.font = `${Math.round(m * 9)}px sans-serif`; ctx.fillText(text, x, y + h + 10 * m);
+  return text;
+}
+
+function noise(ctx, W, H, seed, alpha, n = 900) {
   let s = seed;
   const rnd = () => ((s = (s * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);
   ctx.globalAlpha = alpha;
-  for (let i = 0; i < 900; i++) {
+  for (let i = 0; i < n; i++) {
     ctx.fillStyle = rnd() > 0.5 ? '#000' : '#fff';
     ctx.fillRect(rnd() * W, rnd() * H, 2 + rnd() * W * 0.004, 2 + rnd() * H * 0.004);
   }
   ctx.globalAlpha = 1;
 }
 
-function label(ctx, x, y, w, h, code, k) {
-  ctx.fillStyle = '#e9e8e1'; ctx.fillRect(x, y, w, h);
-  ctx.strokeStyle = '#222'; ctx.lineWidth = 2 * k; ctx.strokeRect(x + 6 * k, y + 6 * k, w - 12 * k, h - 12 * k);
-  ctx.fillStyle = '#111'; ctx.font = `bold ${Math.round(h * 0.07)}px sans-serif`;
-  ctx.fillText('DEMO LABEL - NOT A SHIPMENT', x + 14 * k, y + h * 0.12);
-  ctx.font = `${Math.round(h * 0.055)}px sans-serif`;
-  ctx.fillText('Order TFC-001599999   Box ' + (code.slice(-1) === '2' ? '2/2' : '1/2'), x + 14 * k, y + h * 0.22);
-  drawBarcode(ctx, code, x + w / 2, y + h * 0.3, w * 0.86, h * 0.3, Math.max(2, Math.round(2 * k)));
-  ctx.fillStyle = '#111'; ctx.font = `bold ${Math.round(h * 0.075)}px monospace`;
-  ctx.fillText('AWB ' + code, x + w * 0.2, y + h * 0.72);
-  ctx.font = `${Math.round(h * 0.05)}px sans-serif`;
-  ctx.fillText('Demo Street, Test City 000000', x + 14 * k, y + h * 0.84);
+// A made-up packing slip, `w` wide (about 100 x 135 mm). The order number sits at the top right, small as on the
+// owner's sample (about 3 mm) or, with `big`, as the template edit prints it.
+export function drawSlip(ctx, x, y, w, order, big = false) {
+  const h = w * 1.35, f = (r, b = '') => `${b} ${Math.round(w * r)}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle = '#fbfbf8'; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#bbb'; ctx.lineWidth = Math.max(1, w * 0.002); ctx.strokeRect(x, y, w, h);
+  ctx.fillStyle = '#111';
+  ctx.font = f(0.042, 'bold'); ctx.textAlign = 'left'; ctx.fillText('DEMO STORE', x + w * 0.05, y + w * 0.08);
+  ctx.font = f(0.022); ctx.fillText('made-up slip for tests', x + w * 0.05, y + w * 0.11);
+  ctx.textAlign = 'right';
+  // big: the template edit prints the order number on its own line under the header, about 7 mm tall
+  ctx.font = f(big ? 0.07 : 0.032, 'bold'); ctx.fillText(`Order #${order}`, x + w * 0.95, y + w * (big ? 0.21 : 0.075));
+  ctx.font = f(0.024); ctx.fillText('17 Oct 2026', x + w * 0.95, y + w * 0.11);
+  ctx.textAlign = 'left';
+  const dy = big ? 0.12 : 0, Y = (yy) => y + w * (yy + dy), hr = (yy, t) => ctx.fillRect(x + w * 0.05, Y(yy), w * 0.9, Math.max(1, w * t));
+  const line = (t, r, yy, b) => { ctx.font = f(r, b); ctx.fillText(t, x + w * 0.05, Y(yy)); };
+  const right = (t, r, yy, b) => { ctx.font = f(r, b); ctx.textAlign = 'right'; ctx.fillText(t, x + w * 0.95, Y(yy)); ctx.textAlign = 'left'; };
+  line('SHIP TO', 0.026, 0.22, 'bold');
+  line('Test Customer', 0.03, 0.27); line('12 Demo Street, Test Nagar', 0.03, 0.31); line('Test City 000000', 0.03, 0.35); line('Phone 00000 00000', 0.03, 0.39);
+  hr(0.46, 0.003);
+  line('ITEMS', 0.026, 0.52, 'bold'); right('QTY', 0.026, 0.52, 'bold');
+  line('Demo cushion (test item)', 0.03, 0.58); right('1', 0.03, 0.58);
+  line('Demo roll (test item)', 0.03, 0.63); right('1', 0.03, 0.63);
+  hr(0.7, 0.002);
+  line('Balance to pay: ________', 0.028, 0.77);
+  line('Thank you! (not a real order)', 0.024, 1.2);
+  return h;
 }
 
-// The bay base, as the default outline sees it: u along the length (0 = left wall), v from the back wall (0).
-const BAY_Q = [[0.12, 0.22], [0.88, 0.22], [0.97, 0.85], [0.03, 0.85]];
-function bayPt(W, H, u, v) {
-  const l = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-  const p = l(l(BAY_Q[0], BAY_Q[1], u), l(BAY_Q[3], BAY_Q[2], u), v);
-  return [p[0] * W, p[1] * H];
-}
-const DEFAULT_TRUTH = { weight: '16.85', length: '103.5', breadth: '26', height: '27' };
-
-function drawBay(ctx, W, H, kind, t, code, withLabel, k) {
-  const P = (u, v) => bayPt(W, H, u, v), poly = (pts) => { ctx.beginPath(); pts.forEach((p, i) => (i ? ctx.lineTo(...p) : ctx.moveTo(...p))); ctx.closePath(); };
-  ctx.fillStyle = '#9a9a96'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
-  ctx.fillStyle = '#f2f2ee'; poly([P(0, 0), P(1, 0), P(1, 1), P(0, 1)]); ctx.fill();
-  noise(ctx, W, H, 3, 0.08);
-  ctx.strokeStyle = '#111'; ctx.fillStyle = '#111'; ctx.lineWidth = Math.max(1, k);
-  ctx.font = `bold ${Math.round(12 * k)}px sans-serif`;
-  for (let cm = 0; cm <= 180; cm++) {        // scale L along the front edge
-    const [x, y] = P(cm / 180, 1), len = (cm % 5 ? 6 : 12) * k;
-    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + len); ctx.stroke();
-    if (cm % 10 === 0) ctx.fillText(String(cm), x - 7 * k, y + 26 * k);
+// A made-up courier label, `w` wide: the AWB barcode, the order number as a barcode too, and "Box x/y".
+export function drawLabel(ctx, x, y, w, code, order, boxText = '') {
+  const h = w * 1.05, f = (r, b = '') => `${b} ${Math.round(w * r)}px Arial, Helvetica, sans-serif`;
+  ctx.fillStyle = '#fff'; ctx.fillRect(x, y, w, h);
+  ctx.strokeStyle = '#222'; ctx.lineWidth = Math.max(2, w * 0.004); ctx.strokeRect(x + w * 0.02, y + w * 0.02, w * 0.96, h - w * 0.04);
+  ctx.fillStyle = '#111'; ctx.textAlign = 'left';
+  ctx.font = f(0.05, 'bold'); ctx.fillText('DEMO COURIER - TEST LABEL', x + w * 0.06, y + w * 0.1);
+  if (boxText) { ctx.font = f(0.06, 'bold'); ctx.textAlign = 'right'; ctx.fillText(boxText, x + w * 0.94, y + w * 0.19); ctx.textAlign = 'left'; }
+  drawCode128(ctx, code, x + w * 0.06, y + w * 0.24, w * 0.88, w * 0.26);
+  ctx.font = f(0.055, 'bold'); ctx.fillText('AWB ' + code, x + w * 0.1, y + w * 0.58);
+  if (order) {
+    drawCode128(ctx, order, x + w * 0.2, y + w * 0.64, w * 0.6, w * 0.12);
+    ctx.font = f(0.035); ctx.fillText('Order ' + order, x + w * 0.3, y + w * 0.82);
   }
-  for (const [u, dir] of [[0, -1], [1, 1]]) {   // B1 (left end) and B2 (right end), 0 at the back wall
-    for (let cm = 0; cm <= 75; cm++) {
-      const [x, y] = P(u, cm / 75), len = (cm % 5 ? 6 : 12) * k * dir;
-      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + len, y); ctx.stroke();
-      if (cm % 10 === 0) ctx.fillText(String(cm), x + (dir < 0 ? -34 : 16) * k, y + 4 * k);
-    }
-  }
-  const L = Number(t.length) / 180, B = Number(t.breadth) / 75;
-  ctx.fillStyle = '#c8a46e'; poly([P(0, 0), P(L, 0), P(L, B), P(0, B)]); ctx.fill();   // the box, back-left
-  if (withLabel) { const [cx, cy] = P(L / 2, B / 2); label(ctx, cx - W * 0.06, cy - H * 0.08, W * 0.12, H * 0.16, code, k * 0.28); }
-  ctx.strokeStyle = '#7a4b22'; ctx.lineWidth = 9 * k;
-  if (kind === 'breadth') {                  // low fence against the front of the box
-    ctx.beginPath(); ctx.moveTo(...P(-0.02, B + 0.01)); ctx.lineTo(...P(1.02, B + 0.01)); ctx.stroke();
-  } else {                                   // end panel at the far end, and the height gauge
-    ctx.beginPath(); ctx.moveTo(...P(L + 0.005, -0.02)); ctx.lineTo(...P(L + 0.005, 1.04)); ctx.stroke();
-    const [gx, gy] = P(Math.min(L + 0.07, 0.96), Math.min(B + 0.2, 0.9)), postH = H * 0.32;
-    ctx.lineWidth = 6 * k; ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(gx, gy - postH); ctx.stroke();
-    ctx.lineWidth = Math.max(1, k); ctx.strokeStyle = '#111'; ctx.fillStyle = '#111';
-    for (let cm = 0; cm <= 50; cm++) {
-      const y = gy - (cm / 50) * postH, len = (cm % 5 ? 5 : 10) * k;
-      ctx.beginPath(); ctx.moveTo(gx + 4 * k, y); ctx.lineTo(gx + 4 * k + len, y); ctx.stroke();
-      if (cm % 10 === 0) ctx.fillText(String(cm), gx + 18 * k, y + 4 * k);
-    }
-    const ay = gy - (Number(t.height) / 50) * postH;
-    ctx.strokeStyle = '#7a4b22'; ctx.lineWidth = 5 * k;
-    ctx.beginPath(); ctx.moveTo(gx - 70 * k, ay); ctx.lineTo(gx, ay); ctx.stroke();
-  }
+  ctx.font = f(0.032); ctx.fillText('To: Test Customer, Test City 000000', x + w * 0.06, y + w * 0.95);
+  return h;
 }
 
-function drawScene(ctx, W, H, scene, jx, jy) {
-  const k = W / 1280, kind = String(scene.kind || '').replace(/^measure-/, ''), t = scene.truth || DEFAULT_TRUTH;
-  const withLabel = scene.label !== false;
+function parcel(ctx, W, H, seed) {
+  ctx.fillStyle = '#b6a183'; ctx.fillRect(0, 0, W, H);          // the floor
+  noise(ctx, W, H, seed, 0.25);
+  ctx.fillStyle = '#e9e6dd'; ctx.fillRect(W * 0.04, H * 0.12, W * 0.92, H * 0.8);   // the parcel's wrap
+  noise(ctx, W, H, seed + 1, 0.06, 400);
+}
+
+// The paper on the parcel: the slip, and with `label` the courier label stuck right next to it.
+function papers(ctx, W, H, sc) {
+  const sw = W * (sc.label ? 0.4 : 0.48), sx = sc.label ? W * 0.06 : W * 0.26, sy = H * 0.24;
   ctx.save();
-  ctx.translate(jx * k, jy * k);
-  if (kind === 'label') {
-    ctx.fillStyle = '#b98b5a'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
-    noise(ctx, W, H, 7, 0.25);
-    label(ctx, W * 0.25, H * 0.18, W * 0.5, H * 0.62, scene.code, k);
-  } else if (kind === 'scale') {
-    ctx.fillStyle = '#d9d9d6'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
-    noise(ctx, W, H, 11, 0.15);
-    ctx.fillStyle = '#555'; ctx.fillRect(W * 0.2, H * 0.35, W * 0.6, H * 0.55);           // platform
-    ctx.fillStyle = '#c8a46e'; ctx.fillRect(W * 0.08, H * 0.42, W * 0.84, H * 0.3);       // the box
-    if (withLabel) label(ctx, W * 0.42, H * 0.45, W * 0.16, H * 0.22, scene.code, k * 0.35);
-    ctx.fillStyle = '#122'; ctx.fillRect(W * 0.66, H * 0.05, W * 0.26, H * 0.2);           // display
-    ctx.fillStyle = '#6f6'; ctx.font = `bold ${Math.round(60 * k)}px monospace`;
-    ctx.fillText(Number(t.weight).toFixed(2), W * 0.68, H * 0.2);
-  } else if (kind === 'boxes') {
-    ctx.fillStyle = '#e8e8e4'; ctx.fillRect(-20 * k, -20 * k, W + 40 * k, H + 40 * k);
-    noise(ctx, W, H, 5, 0.15);
-    ctx.fillStyle = '#c8a46e'; ctx.fillRect(W * 0.05, H * 0.2, W * 0.42, H * 0.6); ctx.fillRect(W * 0.53, H * 0.25, W * 0.42, H * 0.55);
-    label(ctx, W * 0.14, H * 0.3, W * 0.24, H * 0.36, scene.code, k * 0.5);
-    label(ctx, W * 0.62, H * 0.33, W * 0.24, H * 0.36, scene.code2 || scene.code, k * 0.5);
-  } else {   // bay: breadth or length-height, boards placed at the box's true size
-    drawBay(ctx, W, H, kind, t, scene.code, withLabel, k);
+  if (sc.tilt) { ctx.translate(W / 2, H / 2); ctx.rotate((sc.tilt * Math.PI) / 180); ctx.translate(-W / 2, -H / 2); }
+  if (sc.slip !== false) drawSlip(ctx, sx, sy, sw, sc.order, sc.bigOrder);
+  if (sc.label) {
+    const lx = W * 0.5, ly = sy + W * 0.02, lw = W * 0.44;
+    drawLabel(ctx, lx, ly, lw, sc.code, sc.labelOrder === undefined ? sc.order : sc.labelOrder, sc.boxText || '');
+    if (sc.smudge) {   // the label's barcodes rubbed out (its printed text still reads)
+      ctx.fillStyle = '#8d8d88';
+      ctx.fillRect(lx + lw * 0.04, ly + lw * 0.22, lw * 0.92, lw * 0.3); ctx.fillRect(lx + lw * 0.18, ly + lw * 0.62, lw * 0.64, lw * 0.16);
+    }
   }
   ctx.restore();
 }
 
-// Demo buttons: a bright glare spot where a reading is, and a hand over the label's barcode.
-const GLARE_AT = { scale: [0.79, 0.15], breadth: [0.9, 0.5], 'length-height': [0.9, 0.5], label: [0.5, 0.42], boxes: [0.3, 0.45] };
-function glare(ctx, W, H, kind) {
-  const [x, y] = GLARE_AT[kind] || [0.5, 0.5], r = W * 0.07, g = ctx.createRadialGradient(x * W, y * H, 0, x * W, y * H, r);
-  g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.65, 'rgba(255,255,255,1)'); g.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x * W, y * H, r, 0, Math.PI * 2); ctx.fill();
+function measureScene(ctx, W, H, sc) {
+  parcel(ctx, W, H, 11);
+  const kind = sc.kind;
+  // the paper (smaller: it only has to be in view)
+  const small = { ...sc, tilt: 0 };
+  ctx.save(); ctx.translate(W * 0.18, H * 0.42); ctx.scale(0.55, 0.55); papers(ctx, W, H * 0.6, small); ctx.restore();
+  ctx.fillStyle = '#111';
+  if (kind === 'scale') {
+    ctx.fillStyle = '#3c4650'; ctx.fillRect(W * 0.1, H * 0.86, W * 0.8, H * 0.05);
+    ctx.fillStyle = '#1b2229'; ctx.fillRect(W * 0.55, H * 0.14, W * 0.38, H * 0.1);
+    ctx.fillStyle = '#7cf29a'; ctx.font = `bold ${Math.round(W * 0.07)}px monospace`; ctx.fillText(sc.weight || '18.40', W * 0.58, H * 0.215);
+  } else {   // a tape with cm marks, read where it meets the L-square
+    const vertical = kind === 'height';
+    ctx.save();
+    if (vertical) { ctx.translate(W * 0.88, H * 0.9); ctx.rotate(-Math.PI / 2); } else ctx.translate(W * 0.04, H * 0.2);
+    const len = vertical ? H * 0.75 : W * 0.92;
+    ctx.fillStyle = '#f2c200'; ctx.fillRect(0, 0, len, W * 0.05);
+    ctx.fillStyle = '#111'; ctx.font = `bold ${Math.round(W * 0.022)}px sans-serif`;
+    for (let i = 0; i <= 60; i++) {
+      const xx = (i / 60) * len;
+      ctx.fillRect(xx, 0, 2, i % 5 ? W * 0.012 : W * 0.022);
+      if (i % 10 === 0) ctx.fillText(String(i + (sc.tapeFrom || 80)), xx + 4, W * 0.045);
+    }
+    ctx.restore();
+    ctx.fillStyle = '#1e1e1e';
+    if (vertical) ctx.fillRect(W * 0.3, H * 0.3, W * 0.6, W * 0.02); else ctx.fillRect(W * 0.8, H * 0.1, W * 0.02, H * 0.8);
+  }
 }
-function hand(ctx, W, H, kind) {
-  const box = kind === 'label' ? [0.28, 0.32, 0.44, 0.28] : kind === 'scale' ? [0.4, 0.43, 0.2, 0.26] : kind === 'boxes' ? [0.12, 0.28, 0.3, 0.4] : [0.31, 0.26, 0.16, 0.2];
-  ctx.fillStyle = '#c68863';
-  ctx.beginPath(); ctx.roundRect(box[0] * W, box[1] * H, box[2] * W, box[3] * H, W * 0.02); ctx.fill();
+
+function boxesScene(ctx, W, H, sc) {
+  parcel(ctx, W, H, 5);
+  ctx.fillStyle = '#d9d2c3'; ctx.fillRect(W * 0.04, H * 0.15, W * 0.44, H * 0.7); ctx.fillRect(W * 0.52, H * 0.18, W * 0.44, H * 0.67);
+  drawLabel(ctx, W * 0.07, H * 0.3, W * 0.38, sc.code, sc.order, 'Box 1/2');
+  drawLabel(ctx, W * 0.55, H * 0.32, W * 0.38, sc.code2 || sc.code, sc.order, 'Box 2/2');
+}
+
+// One pretend photo. scene: {kind: 'first'|'slip'|'label'|'scale'|'length'|'breadth'|'height'|'boxes',
+//   paper: 'slip'|'label'|'product'|'blank' (the first photo), order, labelOrder, code, code2, boxText, bigOrder,
+//   label (show the label in measurement photos), tilt (degrees), blur (px), weight}
+export function drawScene(ctx, W, H, scene) {
+  const sc = { order: '', code: '', ...scene };
+  const kind = sc.kind === 'first' ? sc.paper || 'slip' : sc.kind;
+  if (kind === 'slip' || kind === 'label') {
+    parcel(ctx, W, H, 7);
+    papers(ctx, W, H, { ...sc, label: kind === 'label' });
+  } else if (kind === 'product') {     // a product barcode sticker, no slip, no label
+    parcel(ctx, W, H, 9);
+    drawEan13(ctx, sc.ean || '890123456789', W * 0.3, H * 0.4, W * 0.4, H * 0.08);
+  } else if (kind === 'blank') {
+    parcel(ctx, W, H, 13);
+  } else if (kind === 'smudged') {     // a crumpled courier label: sharp, but its barcodes and numbers do not read
+    parcel(ctx, W, H, 15);
+    const x = W * 0.28, y = H * 0.24, w = W * 0.44;
+    drawLabel(ctx, x, y, w, sc.code || '99001610209999', sc.order || '');
+    ctx.fillStyle = '#8d8d88'; ctx.fillRect(x + w * 0.03, y + w * 0.2, w * 0.94, w * 0.68);
+    ctx.strokeStyle = '#f4f4ef'; ctx.lineWidth = Math.max(3, w * 0.008);
+    for (let i = 0; i < 9; i++) { ctx.beginPath(); ctx.moveTo(x + w * (0.05 + i * 0.1), y + w * 0.22); ctx.lineTo(x + w * (0.1 + i * 0.1), y + w * 0.86); ctx.stroke(); }
+  } else if (kind === 'boxes') {
+    boxesScene(ctx, W, H, sc);
+  } else {
+    measureScene(ctx, W, H, { ...sc, slip: true });
+  }
+}
+
+// A pretend photo as a JPEG blob, portrait like a phone camera (3000 x 4000), blurred if asked.
+export async function photo(scene, W = 3000, H = 4000, quality = 0.9) {
+  const c = new OffscreenCanvas(W, H), ctx = c.getContext('2d');
+  drawScene(ctx, W, H, scene);
+  let out = c;
+  if (scene.blur) {
+    out = new OffscreenCanvas(W, H);
+    const o = out.getContext('2d');
+    o.filter = `blur(${scene.blur}px)`;
+    o.drawImage(c, 0, 0);
+  }
+  return out.convertToBlob({ type: 'image/jpeg', quality });
 }
 
 export class DemoCamera {
-  constructor() {
-    this.canvas = null; this.stream = null; this.video = null; this.scene = { kind: 'label', code: '' }; this.shakeUntil = 0; this.timer = 0; this.track = null;
-    this.ctrl = { shake: false, glare: false, cover: false };
-  }
-
-  paint(ctx, W, H, jx, jy) {
-    drawScene(ctx, W, H, this.scene, jx, jy);
-    ctx.filter = 'none';
-    const kind = String(this.scene.kind || '').replace(/^measure-/, '');
-    if (this.ctrl.cover) hand(ctx, W, H, kind);
-    if (this.ctrl.glare) glare(ctx, W, H, kind);
-  }
-
-  setScene(scene) {
-    this.scene = { ...this.scene, ...scene };
-    this.shakeUntil = performance.now() + 1200;
-  }
-
-  async start(video) {
-    this.stop();
-    this.canvas = document.createElement('canvas');
-    this.canvas.width = 1280; this.canvas.height = 720;
-    const ctx = this.canvas.getContext('2d');
-    const tick = () => {
-      const shaking = performance.now() < this.shakeUntil || this.ctrl.shake;
-      ctx.filter = shaking ? 'blur(4px)' : 'none';
-      this.paint(ctx, 1280, 720, shaking ? (Math.random() - 0.5) * 40 : 0, shaking ? (Math.random() - 0.5) * 30 : 0);
-      ctx.filter = 'none';
-    };
-    tick();
-    this.timer = setInterval(tick, 66);
-    this.stream = this.canvas.captureStream(15);
-    this.track = this.stream.getVideoTracks()[0];
-    video.muted = true; video.playsInline = true; video.srcObject = this.stream;
-    await video.play().catch(() => {});
-    if (!video.videoWidth) await new Promise((r) => video.addEventListener('loadedmetadata', r, { once: true }));
-    this.video = video;
-    this.shakeUntil = performance.now() + 1200;
-    return this.info();
-  }
-
-  async attach(video) {
-    video.muted = true; video.playsInline = true; video.srcObject = this.stream;
-    await video.play().catch(() => {});
-    if (!video.videoWidth) await new Promise((r) => video.addEventListener('loadedmetadata', r, { once: true }));
-    this.video = video;
-  }
-
-  info() { return { label: 'Demo camera (computer test)', preview: '1280x720', still: '4000x2250 drawn' }; }
-
-  stop() {
-    clearInterval(this.timer);
-    if (this.stream) for (const t of this.stream.getTracks()) t.stop();
-    if (this.video) this.video.srcObject = null;
-    this.stream = null; this.video = null; this.track = null;
-  }
-
-  get live() { return !!this.stream; }
-
-  async takePhoto() {
-    const W = 4000, H = 2250, c = new OffscreenCanvas(W, H), ctx = c.getContext('2d');
-    if (performance.now() < this.shakeUntil || this.ctrl.shake) ctx.filter = 'blur(12px)';
-    this.paint(ctx, W, H, 0, 0);
-    return { blob: await c.convertToBlob({ type: 'image/jpeg', quality: 0.95 }), via: 'demo camera' };
-  }
+  constructor() { this.scene = { kind: 'first', paper: 'slip' }; }
+  setScene(scene) { this.scene = { ...this.scene, ...scene }; }
+  async takePhoto() { return { blob: await photo(this.scene), via: 'demo camera' }; }
 }
