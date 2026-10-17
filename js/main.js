@@ -2,6 +2,8 @@
 // (weight, length-height, breadth) from which the reader (Claude, via the backend) takes the numbers -> check and
 // book (one tap; typing only to fix) -> scan the new label (attaches the AWB) -> label photo -> breadth ->
 // length-height -> weight PROOF photos, each re-read and compared with the booking.
+// The reader is optional (v1.2): without an API key nothing is read in the app; the team books with what the scale
+// and tapes show, every photo is saved and uploaded as usual, and the numbers are read from the photos later.
 // Photos are taken automatically only when the frame is sharp, steady and well lit, re-checked on the full-size
 // still, saved on the phone first and uploaded from a queue.
 import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, KIND_INFO, BOX_KINDS, MEASURE_KINDS, READ_LONG_SIDE, MAX_JPEG_BYTES, MAX_LONG_SIDE, MIN_QUALITY, DEMO_AWB, TEST_SITE, TEST_BACKEND } from './config.js';
@@ -138,6 +140,19 @@ function demoTruth() {
 const liveReads = new Set();
 const rereadListeners = new Map();
 
+// The reader is optional. The backend says whether it has an API key (ping -> reader); without one the app does
+// not read: the reading photos are saved as usual and the numbers are read from them later, outside the app.
+// Unknown (no answer yet) counts as on, so a failed read still shows "Read again".
+const readerOff = () => app.settings.reader === false;
+async function refreshReader() {
+  const st = app.settings;
+  if (!st.scriptUrl || !st.key) return;
+  try {
+    const r = await transport.post(st.scriptUrl, { v: 1, action: 'ping', key: st.key, station: st.station, app: APP_VERSION, phone: st.phoneModel, test: st.test }, 15000);
+    if (r && r.ok && app.settings.reader !== !!r.reader) await saveSettings({ reader: !!r.reader });
+  } catch { /* offline: keep the last answer */ }
+}
+
 function readsChanged(sid) {
   const [r, a] = parts();
   if (!$('#modal').classList.contains('hidden')) return;   // never redraw under an open question
@@ -146,6 +161,11 @@ function readsChanged(sid) {
 }
 
 async function startMeasureRead(sid, boxId, kind, photoId, images) {
+  if (readerOff() || !images) {   // no reader: nothing to wait for, the photo is read later
+    await R.updateBox(boxId, (b) => R.applyRead(b, kind, photoId, { ok: false, code: 'no_reader' }));
+    readsChanged(sid);
+    return;
+  }
   const key = `${boxId}|${kind}`;
   liveReads.add(key);
   try {
@@ -153,6 +173,8 @@ async function startMeasureRead(sid, boxId, kind, photoId, images) {
     readsChanged(sid);
     const truth = (await db.get('boxes', boxId) || {}).demo_truth;
     const r = await requestRead(app.settings, kind, images, truth);
+    if (r.code === 'no_reader') await saveSettings({ reader: false });
+    else if (r.ok && app.settings.reader !== true) await saveSettings({ reader: true });
     await R.updateBox(boxId, (b) => {
       R.applyRead(b, kind, photoId, r);
       if (r.ok && r.split) b.read_jobs[kind].warn = r.split;
@@ -174,6 +196,7 @@ async function rereadFromPhoto(sid, boxId, kind) {
   const d = await R.load(sid);
   const b = d && d.boxes.find((x) => x.id === boxId);
   const p = b && R.finalPhoto(b.measure[kind], d.byId);
+  if (readerOff()) { toast('No reader is set up: the numbers are read from the photos later'); return; }
   if (!p || !p.blob) { toast('That reading photo is no longer on the phone - retake it', 'bad'); return; }
   const aspect = (p.checks && p.checks.preview_aspect) || p.width / p.height;
   const res = await stillJob({ readOnly: { long: READ_LONG_SIDE, quality: 0.85, crops: readCrops(kind, app.settings.calib, aspect) }, blob: p.blob, previewAspect: aspect }).done;
@@ -188,7 +211,8 @@ async function startRecheck(sid, boxId, kind, photoId, images) {
   const p = await db.get('photos', photoId), b = R.upgradeBox(await db.get('boxes', boxId));
   if (!p || !b) return;
   const fields = kind === 'scale' ? ['weight'] : kind === 'length-height' ? ['length', 'height'] : ['breadth'];
-  if (!r.ok) p.reread = { status: 'failed', error: r.error || r.code, at: isoLocal() };
+  if (r.code === 'no_reader') { await saveSettings({ reader: false }); p.reread = { status: 'skipped', at: isoLocal() }; }
+  else if (!r.ok) p.reread = { status: 'failed', error: r.error || r.code, at: isoLocal() };
   else {
     const diffs = [];
     for (const f of fields) {
@@ -215,6 +239,7 @@ function fieldLine(b, f) {
     return { ok: true, html: `<b>${esc(v)} ${unit}</b> <span class="small muted">(${how})</span>`, conf: src && src.confidence, typed: src && src.source === 'typed' };
   }
   if (job && job.status === 'reading') return { html: '<span class="muted">reading…</span>', pending: true };
+  if (job && job.status === 'later') return { html: '<span class="muted">read later from the photo</span>', later: true };
   if (job && (job.status === 'failed' || job.status === 'partial')) return { html: `<span style="color:var(--bad)">not read</span> <span class="small muted">${esc(job.error || 'unclear in the photo')}</span>`, failed: true };
   return { html: '<span class="muted">no photo yet</span>' };
 }
@@ -351,6 +376,7 @@ function bookGrid(b) {
     `<div><small>Weight</small><b>${k.weight ?? '-'}</b><span>kg</span></div></div>`;
 }
 const measuredLine = (b) => `Readings: L ${esc(b.readings.length || '-')} · B ${esc(b.readings.breadth || '-')} · H ${esc(b.readings.height || '-')} cm · ${esc(b.readings.weight || '-')} kg`;
+const allLater = (b) => R.measureDone(b) && MEASURE_KINDS.every((k) => (b.read_jobs[k] || {}).status === 'later');
 
 async function screenShipment(sid) {
   const d = await R.load(sid);
@@ -358,13 +384,13 @@ async function screenShipment(sid) {
   const { s, boxes } = d, stt = R.shipmentStatus(s, boxes), nx = R.nextStep(s, boxes), multi = boxes.length > 1;
   const kindMark = (b, k) => (b.photos[k].length ? '✓' : '·');
   const boxCard = (b) => `<div class="card"><h3>Box ${b.n}${multi ? ' of ' + boxes.length : ''} · ${esc(R.boxStatus(s, b))}</h3>
-      ${R.readingsDone(b) ? bookGrid(b) + `<div class="small muted">${measuredLine(b)}</div>` : `<p class="muted">${measuredLine(b)}</p>`}
+      ${R.readingsDone(b) ? bookGrid(b) + `<div class="small muted">${measuredLine(b)}</div>` : `<p class="muted">${allLater(b) ? 'Numbers: read later from the reading photos' : measuredLine(b)}</p>`}
       ${s.booked_at ? `<div class="small" style="margin-top:6px">Photos: label ${kindMark(b, 'label')} · breadth ${kindMark(b, 'breadth')} · length-height ${kindMark(b, 'length-height')} · weight ${kindMark(b, 'scale')}${b.label && b.label.child ? ` · box label <span class="awb">${esc(b.label.code)}</span>` : ''}</div>` : ''}
-      ${!s.booked_at && !s.cancelled_at ? `<div class="row" style="margin-top:8px"><button data-meas="${esc(b.id)}">${R.measureDone(b) ? 'Readings of this box' : 'Take the reading photos'}</button><button data-edit="${esc(b.id)}">Type readings</button></div>` : ''}
+      ${!s.booked_at && !s.cancelled_at ? `<div class="row" style="margin-top:8px"><button data-meas="${esc(b.id)}">${R.measureDone(b) ? 'Reading photos of this box' : 'Take the reading photos'}</button>${readerOff() ? '' : `<button data-edit="${esc(b.id)}">Type readings</button>`}</div>` : ''}
     </div>`;
   let main = '';
   if (s.cancelled_at) main = `<div class="card bad"><b>Cancelled</b> ${esc(s.cancel_reason)}</div>`;
-  else if (nx.screen === 'book') main = `<button class="big primary" id="next">Check readings and book</button>`;
+  else if (nx.screen === 'book') main = `<button class="big primary" id="next">${readerOff() ? 'Book' : 'Check readings and book'}</button>`;
   else if (nx.screen === 'capture') main = `<button class="big primary" id="next">Continue: ${nx.kind === 'boxes' ? 'photo of all boxes' : `box ${nx.box.n} ${KIND_INFO[nx.kind].title.toLowerCase()} photo`}</button>`;
   else main = `<div class="card go"><b>All photos taken ✓</b></div>`;
   view(`${bar(s.awb ? 'AWB ' + fmtAwb(s.awb) : 'New order record')}<main>
@@ -502,7 +528,7 @@ function readingsCard(s, b, byId, urls) {
   const rows = ['weight', 'length', 'breadth', 'height'].map((f) => {
     const L = fieldLine(b, f), check = L.ok && !L.typed && L.conf && L.conf !== 'high';
     return `<tr><th>${FIELD_NAMES[f]}</th><td>${L.html}${check ? ' <span class="chip wait">check the photo</span>' : ''}</td>` +
-      `<td>${s.booked_at ? '' : `<button class="mini" data-fix="${esc(b.id)}|${f}">${L.ok ? 'Fix' : 'Type'}</button>`}</td></tr>`;
+      `<td>${s.booked_at || readerOff() ? '' : `<button class="mini" data-fix="${esc(b.id)}|${f}">${L.ok ? 'Fix' : 'Type'}</button>`}</td></tr>`;
   }).join('');
   const photos = MEASURE_KINDS.map((k) => {
     const p = R.finalPhoto(b.measure[k] || [], byId), j = b.read_jobs[k] || {};
@@ -545,9 +571,9 @@ async function screenBoxReadings(boxId) {
   const urls = [];
   app.cleanup = () => urls.forEach((u) => URL.revokeObjectURL(u));
   view(`${bar(`Box ${b.n}${boxes.length > 1 ? ' of ' + boxes.length : ''} · readings`, `#/s/${encodeURIComponent(s.id)}`)}<main>
-    <div class="instr"><b>Reading photos taken.</b> ${R.readsPending(b) ? 'The numbers are being read from them - a few seconds.' : 'Check the numbers below.'}</div>
+    <div class="instr"><b>Reading photos taken.</b> ${readerOff() ? 'The numbers are read from them later. Retake a photo if it does not show the scales clearly.' : R.readsPending(b) ? 'The numbers are being read from them - a few seconds.' : 'Check the numbers below.'}</div>
     <div class="card">${readingsCard(s, b, byId, urls)}</div>
-    <button class="big primary" id="tobook">All boxes measured: check and book</button>
+    <button class="big primary" id="tobook">${readerOff() ? 'All boxes photographed: book' : 'All boxes measured: check and book'}</button>
     <button class="wide" id="another" style="margin-top:10px">+ Another box in this order</button>
   </main>`);
   wireReadings(s.id);
@@ -563,14 +589,19 @@ async function screenBook(sid) {
   if (s.booked_at) return go(`#/s/${encodeURIComponent(sid)}`);
   const noPhotos = boxes.find((b) => !R.readingsDone(b) && !R.measureDone(b));
   if (noPhotos) return go(measureNextHash(s, noPhotos));
-  const allDone = boxes.every(R.readingsDone), pending = boxes.some(R.readsPending);
+  // Booking never waits for numbers: without a reader (or when one could not be read) they are read from the
+  // reading photos later. With a reader, the numbers it read are shown to book with.
+  const allDone = boxes.every(R.readingsDone), pending = boxes.some(R.readsPending), later = readerOff();
   const urls = [];
   app.cleanup = () => urls.forEach((u) => URL.revokeObjectURL(u));
-  view(`${bar('Check and book', `#/s/${encodeURIComponent(sid)}`)}<main>
-    <div class="instr"><b>Check the readings, then book with exactly these numbers.</b> Each side is rounded up to the next whole cm and the weight to the next 0.1 kg.${multi ? ' Book once, with each box\'s own numbers.' : ''}</div>
+  const instr = later && !allDone
+    ? `<b>Book the courier with what the scale and the tapes show.</b> Each side up to the next whole cm, the weight up to the next 0.1 kg.${multi ? ' Book once, with each box\'s own numbers.' : ''} The numbers are read from the reading photos later.`
+    : `<b>Check the readings, then book with exactly these numbers.</b> Each side is rounded up to the next whole cm and the weight to the next 0.1 kg.${multi ? ' Book once, with each box\'s own numbers.' : ''}`;
+  view(`${bar(later ? 'Book' : 'Check and book', `#/s/${encodeURIComponent(sid)}`)}<main>
+    <div class="instr">${instr}</div>
     ${boxes.map((b) => `<div class="card">${multi ? `<h3>Box ${b.n} of ${boxes.length}</h3>` : ''}${readingsCard(s, b, byId, urls)}${R.readingsDone(b) ? bookGrid(b) : ''}</div>`).join('')}
-    ${allDone ? '<div class="card warn">Print the label and stick it <b>centred on the top face</b>, with the box still in the bay and the fence in place. Do not edit the booking after the label prints.</div>' : ''}
-    <button class="big go" id="booked" ${allDone ? '' : 'disabled'}>${allDone ? 'Booked with these numbers - the label is on' : pending ? 'Reading the photos…' : 'Fill in the missing readings first'}</button>
+    <div class="card warn">Print the label and stick it <b>centred on the top face</b>, with the box still in the bay and the fence in place. Do not edit the booking after the label prints.</div>
+    <button class="big go" id="booked" ${pending ? 'disabled' : ''}>${pending ? 'Reading the photos…' : allDone ? 'Booked with these numbers - the label is on' : 'Booked - the label is on'}</button>
   </main>`);
   wireReadings(sid);
   $('#booked').onclick = async () => {
@@ -581,10 +612,15 @@ async function screenBook(sid) {
         if (r && r.source === 'read' && r.confidence && r.confidence !== 'high') checks.push(`${multi ? `Box ${b.n} ` : ''}${f}: ${b.readings[f]} (read with ${r.confidence} confidence)`);
       }
       for (const k of MEASURE_KINDS) if ((b.read_jobs[k] || {}).warn) checks.push(`${multi ? `Box ${b.n} ` : ''}${b.read_jobs[k].warn}`);
+      // A reader that could not read a photo: say so once (the number is read from the photo later).
+      if (!later && !R.readingsDone(b) && R.readFailed(b)) {
+        const miss = ['weight', 'length', 'breadth', 'height'].filter((f) => checkReading(f, b.readings[f]));
+        checks.push(`${multi ? `Box ${b.n} ` : ''}not read: ${miss.join(', ')} - book with what the scale and tapes show; it is read from the photo later`);
+      }
     }
     if (checks.length) {
       const okd = await modal(`<h3>Please look at the photos for these</h3><ul>${checks.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>
-        <p class="small muted">If a number is wrong, go back and Fix it before booking.</p><div class="row"><button id="no">Back</button><button class="go" id="yes">They are right - booked</button></div>`,
+        <p class="small muted">If a number is wrong, go back and Fix it, or Retake the photo, before booking.</p><div class="row"><button id="no">Back</button><button class="go" id="yes">Booked - the label is on</button></div>`,
       (m, close) => { $('#no', m).onclick = () => close(false); $('#yes', m).onclick = () => close(true); });
       if (!okd) return;
     }
@@ -637,13 +673,14 @@ async function screenCapture(sid, bid, kind) {
   // Screen state (the analysis loop below reads and writes these).
   let typed = !!(b && b.label && b.label.typed), showTake = false, showType = false;
   let prev = null, steadySince = 0, peaks = [], busy = false, hist = [], lastGood = 0, lastBars = [], scanBusy = false, tick = 0;
+  let readingNow = false;   // this photo goes to the reader (set per capture)
   let chooser = false, lastSharp = 0, lastSteady = 0, started = performance.now(), scanFrom = 0, warnedAt = 0;
 
   const expected = () => (b && b.label ? b.label.code : s.awb);
   function header() {
     if (isMeasure) {
       $('#ttl').textContent = `${multi ? `Box ${b.n}/${boxes.length} · ` : ''}Reading ${info.step}/3: ${info.title}`;
-      $('#awbline').textContent = 'Before booking: the app reads the numbers from this photo';
+      $('#awbline').textContent = 'Before booking: the numbers are read from this photo';
     } else {
       const step = kind === 'boxes' ? '' : `Step ${BOX_KINDS.indexOf(kind) + 1}/4 · `;
       $('#ttl').textContent = `${multi && b && picked ? `Box ${b.n}/${boxes.length} · ` : ''}${step}Photo ${info.photo}: ${info.title}`;
@@ -667,6 +704,7 @@ async function screenCapture(sid, bid, kind) {
       const done = ['weight', 'length', 'breadth', 'height'].map((f) => `${FIELD_NAMES[f]}: ${fieldLine(b, f).html}`);
       rec.innerHTML = `<span class="small">${done.join(' · ')}</span>`;
     } else if (kind === 'label') rec.innerHTML = bk && picked ? `Booked: ${bk.length} × ${bk.breadth} × ${bk.height} cm, ${bk.weight} kg - the label should show these.` : '';
+    else if (kind !== 'boxes' && !bk) rec.innerHTML = '<span class="small">The numbers for this box are read from its reading photos later.</span>';
     else if (kind === 'breadth') rec.innerHTML = `Recorded breadth <b>${esc(r.breadth)} cm</b> (booked ${bk.breadth}). If the fence now reads differently, measure again.`;
     else if (kind === 'length-height') rec.innerHTML = `Recorded length <b>${esc(r.length)} cm</b> (booked ${bk.length}) · height <b>${esc(r.height)} cm</b> (booked ${bk.height}).`;
     else if (kind === 'scale') rec.innerHTML = `Recorded weight <b>${esc(r.weight)} kg</b> (booked ${bk.weight}).`;
@@ -676,7 +714,7 @@ async function screenCapture(sid, bid, kind) {
 
   function actions() {
     const acts = $('#acts'), btns = [];
-    if (['breadth', 'length-height', 'scale'].includes(kind)) btns.push('<button id="differs">Reading differs?</button>');
+    if (['breadth', 'length-height', 'scale'].includes(kind) && b && b.book) btns.push('<button id="differs">Reading differs?</button>');
     if (kind === 'label' && picked && showType && !typed) btns.push('<button id="typeawb">Type the AWB</button>');
     if (kind === 'label' && s.awb && !Object.keys(byId).length) btns.push('<button id="wrongawb">Wrong AWB? Rescan</button>');
     if (showTake) btns.push('<button id="take">Take anyway</button>');
@@ -744,7 +782,7 @@ async function screenCapture(sid, bid, kind) {
       if (res[f] === b.readings[f]) continue;
       await R.addRemeasure(b, f, res[f]);
       const nb = bookNumbers({ ...b.readings, [f]: res[f] });
-      if (String(nb[f]) !== String(b.book[f])) changedBooking = true;
+      if (b.book && String(nb[f]) !== String(b.book[f])) changedBooking = true;
     }
     await rowsChanged(s, [b]);
     if (!changedBooking) { toast('Re-measure saved; the booked numbers still hold'); return; }
@@ -871,10 +909,12 @@ async function screenCapture(sid, bid, kind) {
       if (!run.alive) return;
       busyEl.textContent = 'Checking the photo...';
       const vw = video.videoWidth, vh = video.videoHeight, aspect = vw / vh, zone = glareZone(look, st.calib, aspect);
+      // Images for the reader only when there is one (and, for a proof photo, a booking to compare with).
+      readingNow = !readerOff() && (isMeasure || (recheck && !!(b && b.book)));
       const job = stillJob({
         blob: shot.blob, zone, spotShare: lv.glareSpot, previewAspect: aspect,
         maxLong: MAX_LONG_SIDE, maxBytes: MAX_JPEG_BYTES, minQuality: MIN_QUALITY, probeLong: kind === 'label' ? 1800 : 0,
-        read: isMeasure || recheck ? { long: READ_LONG_SIDE, quality: 0.85, crops: readCrops(kind, st.calib, aspect) } : null,
+        read: readingNow ? { long: READ_LONG_SIDE, quality: 0.85, crops: readCrops(kind, st.calib, aspect) } : null,
         exif: {
           make: st.phoneMake, model: st.phoneModel, software: `TFC Packing Proof ${APP_VERSION}`, dateMs: when.getTime(), uniqueId: id,
           description: `TFC packing proof | AWB ${s.awb || 'not yet booked'} | ${b ? `box ${b.n} of ${boxes.length}` : `${boxes.length} boxes`} | ${kind}`,
@@ -905,8 +945,9 @@ async function screenCapture(sid, bid, kind) {
         return;
       }
       busyEl.classList.add('hidden');
-      // Reading photo: the numbers are read now, in the background, while the team moves to the next step.
-      if (isMeasure && c.read) startMeasureRead(sid, b.id, kind, id, c.read);
+      // Reading photo: the numbers are read now, in the background, while the team moves to the next step
+      // (no reader: the photo is marked to be read later).
+      if (isMeasure) startMeasureRead(sid, b.id, kind, id, c.read);
       const rv = showReview(c.preview, pass);
       const res = await job.done;   // the JPEG under 2 MB, with EXIF
       if (!res.ok) throw new Error(res.error);
@@ -944,8 +985,9 @@ async function screenCapture(sid, bid, kind) {
     return {
       saved(p, checks) {
         $('#rvok').textContent = `${checks.pass ? 'Saved ✓' : 'Saved - taken anyway'} · ${p.name || `${KIND_INFO[kind].title} (named when the label is scanned)`}`;
-        $('#rvline').textContent = checksLine(checks) + (isMeasure ? ' · reading the numbers…' : recheck ? ' · re-reading against the booking…' : '');
-        if (recheck) {
+        $('#rvline').textContent = checksLine(checks) + (isMeasure ? (readingNow ? ' · reading the numbers…' : ' · the numbers are read from this photo later')
+          : recheck && readingNow ? ' · re-reading against the booking…' : '');
+        if (recheck && readingNow) {
           rereadListeners.set(p.id, (rr) => {
             const line = $('#rvline');
             if (!line) return;
@@ -1001,11 +1043,14 @@ async function screenDone(sid) {
     if (p && p.reread) rr.push({ b, k, r: p.reread });
   }
   const bad = rr.filter((x) => x.r.status === 'done' && x.r.mismatch);
-  const pendingRe = boxes.some((b) => BOX_KINDS.some((k) => { const p = R.finalPhoto(b.photos[k], byId); return p && ['breadth', 'length-height', 'scale'].includes(k) && !p.reread; }));
+  // Re-reads only run with a reader and a box that has numbers to compare with.
+  const pendingRe = !readerOff() && boxes.some((b) => b.book && BOX_KINDS.some((k) => { const p = R.finalPhoto(b.photos[k], byId); return p && ['breadth', 'length-height', 'scale'].includes(k) && !p.reread; }));
+  const later = boxes.filter((b) => !R.readingsDone(b));
   view(`${bar('Done')}<main>
     <div class="card go"><h3>All photos taken ✓</h3><p>Take the phone off the mount and hand the box over.</p></div>
     ${bad.length ? `<div class="card bad"><h3>Check before handing over</h3>${bad.map((x) => `<p>${boxes.length > 1 ? `Box ${x.b.n} ` : ''}${esc(KIND_INFO[x.k].title)} photo: ${esc(x.r.mismatch)}</p>`).join('')}<p class="small">If the booking is wrong, peel the label and redo the box from the start.</p></div>`
-    : pendingRe ? '<div class="card small">Re-reading the proof photos against the booking…</div>' : rr.length ? '<div class="card go small">The proof photos read the same as the booking ✓</div>' : ''}
+    : pendingRe ? '<div class="card small">Re-reading the proof photos against the booking…</div>' : rr.some((x) => x.r.status === 'done') ? '<div class="card go small">The proof photos read the same as the booking ✓</div>' : ''}
+    ${later.length ? `<div class="card small">${boxes.length > 1 ? `Box ${later.map((b) => b.n).join(', ')}: n` : 'N'}umbers to be read from the reading photos later (they are saved with the proof photos).</div>` : ''}
     <div class="card"><dl class="kv"><dt>AWB</dt><dd><span class="awb">${esc(s.awb)}</span></dd><dt>Boxes</dt><dd>${boxes.length}</dd>
       <dt>Uploaded</dt><dd id="sent">...</dd></dl></div>
     <button class="big primary" id="new">New box</button>
@@ -1093,10 +1138,12 @@ async function screenSettings() {
       <button class="wide" id="resetlv">Reset levels</button>
     </details>
     <label class="check"><input type="checkbox" id="demo" ${st.demo ? 'checked' : ''}><span>Demo camera <span class="small muted">(computer testing only; forces TEST mode)</span></span></label>
-    ${app.harness ? `<h2>Reading the numbers (test site)</h2>
-    <label class="field">Anthropic API key for this test <span class="hint">Only on this test site, which has no backend: the key stays on this device and goes straight to Anthropic. Use a separate key with a low spending limit and delete it after the test. The real backend keeps its key in the Apps Script instead.</span>
+    <h2>Reading the numbers</h2>
+    <p class="small">${st.reader === false ? 'Later, from the photos: no reader is set up, so the app leaves the numbers empty and the reading photos are read afterwards.'
+      : st.reader ? 'In the app: the numbers are read from each reading photo straight away.' : 'Not known yet: Test connection to find out.'}</p>
+    ${app.harness ? `<label class="field">Anthropic API key for this test (optional) <span class="hint">Only on this test site, which has no backend: the key stays on this device and goes straight to Anthropic. Use a separate key with a low spending limit and delete it after the test. The real backend keeps its key in the Apps Script instead.</span>
       <input type="password" id="aikey" value="${esc(st.testAiKey || '')}" autocomplete="off" placeholder="sk-ant-..."></label>
-    <p class="small muted">Without a key: the demo camera's drawn numbers are used, and real photos must be typed.</p>` : ''}
+    <p class="small muted">Without a key everything works the same, except that the numbers stay empty: the reading photos are kept and the numbers are read from them later.</p>` : ''}
     <button class="big primary" id="save" style="margin-top:12px">Save</button>
     <h2>About this phone</h2>
     <dl class="kv small"><dt>App</dt><dd>v${APP_VERSION}</dd><dt>Barcode reader</dt><dd id="eng">${esc(barcode.engine)}</dd><dt>Storage</dt><dd id="stor">...</dd>
@@ -1123,8 +1170,12 @@ async function screenSettings() {
     out.textContent = 'Testing...';
     try {
       const r = await transport.post(c.scriptUrl, { v: 1, action: 'ping', key: c.key, station: c.station, app: APP_VERSION, phone: c.phoneModel, test: c.test });
-      if (r.ok) out.innerHTML = `<div class="card go"><b>Connected.</b> This page can read the script's reply, and the key was accepted. Script v${esc(r.version)}.<br>` +
-        `Drive: <a href="${esc(r.root && r.root.url)}" target="_blank" rel="noopener">${esc(r.root && r.root.name)}</a> · Sheet: <a href="${esc(r.sheet && r.sheet.url)}" target="_blank" rel="noopener">open</a></div>`;
+      if (r.ok) {
+        await saveSettings({ reader: !!r.reader });
+        out.innerHTML = `<div class="card go"><b>Connected.</b> This page can read the script's reply, and the key was accepted. Script v${esc(r.version)}.<br>` +
+          `Drive: <a href="${esc(r.root && r.root.url)}" target="_blank" rel="noopener">${esc(r.root && r.root.name)}</a> · Sheet: <a href="${esc(r.sheet && r.sheet.url)}" target="_blank" rel="noopener">open</a><br>` +
+          `Numbers: ${r.reader ? 'read in the app (the script has an API key)' : 'read later from the photos (no API key - that is fine)'}</div>`;
+      }
       else if (r.code === 'bad_key') out.innerHTML = '<div class="card warn"><b>Reply readable, key refused.</b> The page can read the script (CORS is fine), but the station key is wrong.</div>';
       else out.innerHTML = `<div class="card warn">Reply: ${esc(r.code)} ${esc(r.error || '')}</div>`;
     } catch (e) {
@@ -1146,6 +1197,7 @@ async function screenSettings() {
     if (c.cameraId !== st.cameraId || c.demo !== st.demo) stopCamera();
     await saveSettings({ ...c, setupDone: true });
     if (app.harness) app.harness.setReaderKey(c.testAiKey);
+    await refreshReader();
     app.uploader.retryNow();
     toast('Saved', 'go');
     go('#/');
@@ -1306,6 +1358,9 @@ async function boot() {
       await h.load({ persist: true });
       transport.post = h.post; app.harness = h;
       h.setReaderKey(app.settings.testAiKey || '');
+      // The computer demo answers the drawn camera with the numbers it drew (?reader=off to try it without).
+      // The phone TEST site has no such stand-in: a key typed in Settings, or the numbers are read later.
+      h.setDemoReader(!TEST_SITE && qs.get('reader') !== 'off');
       if (!app.settings.setupDone) {
         // ?demo=1: the drawn demo camera, whose bay and scale match the default outlines. Without it (a phone test),
         // the real camera is used and the mounts are calibrated by hand.
@@ -1340,6 +1395,7 @@ async function boot() {
     await db.put('boxes', b);
   }
   registerSW();
+  await Promise.race([refreshReader(), sleep(1500)]);   // never hold the start up for long; the last answer is kept
   await render();
   app.uploader.kick();
 }

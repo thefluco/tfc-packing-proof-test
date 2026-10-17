@@ -12,7 +12,8 @@ function newBox(s, n) {
     id: `${s.id}-b${n}`, shipment_id: s.id, n,
     readings: { weight: '', length: '', height: '', breadth: '' }, readings_at: null, book: null,
     reads: {},        // per field: {source:'read'|'typed', value, confidence, photo_id, at, read_value}
-    read_jobs: {},    // per reading photo kind: {status:'reading'|'done'|'failed', error, notes, flags, missing, at}
+    read_jobs: {},    // per reading photo kind: {status:'reading'|'done'|'partial'|'failed'|'later', error, notes, flags, missing, at}
+                      // 'later': no reader (no API key) - the numbers are read from the photo afterwards
     measure: { 'measure-scale': [], 'measure-length-height': [], 'measure-breadth': [] },
     label: null, photos: { 'label': [], 'breadth': [], 'length-height': [], 'scale': [] },
     remeasures: [], completed_at: null,
@@ -76,6 +77,10 @@ export async function removeLastBox(s) {
 export function readingsDone(b) { return FIELDS.every((f) => !checkReading(f, b.readings[f])); }
 export function measureDone(b) { return MEASURE_KINDS.every((k) => (b.measure[k] || []).length > 0); }
 export function readsPending(b) { return Object.values(b.read_jobs || {}).some((j) => j.status === 'reading'); }
+// A reader tried and could not read a photo (not the same as "no reader": that is 'later').
+export function readFailed(b) { return Object.values(b.read_jobs || {}).some((j) => j.status === 'failed' || j.status === 'partial'); }
+// The reading photos are taken but (some of) the numbers are not in the app: they are read from the photos later.
+export function numbersLater(b) { return measureDone(b) && !readingsDone(b) && !readsPending(b); }
 
 function refreshBook(b) {
   if (readingsDone(b)) { b.book = bookNumbers(b.readings); b.readings_at = b.readings_at || isoLocal(); }
@@ -99,7 +104,8 @@ export async function saveReadings(b, readings) {
 
 // A reader result for one reading photo. A value someone typed is never overwritten; the read value is kept beside it.
 export function applyRead(b, kind, photoId, r) {
-  const job = { status: r.ok ? 'done' : 'failed', error: r.ok ? '' : r.error || r.code || 'failed', code: r.ok ? '' : r.code || '',
+  const later = !r.ok && r.code === 'no_reader';
+  const job = { status: r.ok ? 'done' : later ? 'later' : 'failed', error: r.ok || later ? '' : r.error || r.code || 'failed', code: r.ok ? '' : r.code || '',
     notes: r.notes || '', flags: r.flags || {}, at: isoLocal(), photo_id: photoId, missing: [] };
   if (r.ok) {
     const want = kind === 'measure-scale' ? ['weight'] : kind === 'measure-length-height' ? ['length', 'height'] : ['breadth'];
@@ -138,10 +144,14 @@ export function finalPhoto(ids, byId) { return ids.length ? byId[ids[ids.length 
 export function boxDone(b) { return BOX_KINDS.every((k) => b.photos[k].length > 0); }
 export function photosTaken(b) { return BOX_KINDS.filter((k) => b.photos[k].length > 0).length; }
 
+// A box can be booked once its reading photos are taken, with or without the numbers (no reader: read later).
 export function boxStatus(s, b) {
   if (s.cancelled_at) return 'cancelled';
-  if (!readingsDone(b)) return measureDone(b) ? (readsPending(b) ? 'reading' : 'check readings') : 'measuring';
-  if (!s.booked_at) return 'to book';
+  if (!s.booked_at) {
+    if (!readingsDone(b) && !measureDone(b)) return 'measuring';
+    if (readsPending(b)) return 'reading';
+    return !readingsDone(b) && readFailed(b) ? 'check readings' : 'to book';
+  }
   if (boxDone(b)) return 'complete';
   return `photos ${photosTaken(b)}/4`;
 }
@@ -152,8 +162,11 @@ export function shipmentDone(s, boxes) {
 
 export function shipmentStatus(s, boxes) {
   if (s.cancelled_at) return 'cancelled';
-  if (!boxes.every(readingsDone)) return boxes.every((b) => readingsDone(b) || measureDone(b)) ? 'check readings' : 'measuring';
-  if (!s.booked_at) return 'to book';
+  if (!s.booked_at) {
+    if (boxes.some((b) => !readingsDone(b) && !measureDone(b))) return 'measuring';
+    if (boxes.some(readsPending)) return 'reading';
+    return boxes.some((b) => !readingsDone(b) && readFailed(b)) ? 'check readings' : 'to book';
+  }
   if (shipmentDone(s, boxes)) return 'complete';
   return 'photos';
 }
