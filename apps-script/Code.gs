@@ -4,7 +4,8 @@
  * The station phone POSTs JSON as text/plain (no CORS pre-flight). Every request carries the station key,
  * which is typed once on the phone; only its SHA-256 is stored here (Script Properties), never the key.
  *
- *   action "ping"  - checks the key; returns the Drive folder and Sheet links (the phone's "Test connection")
+ *   action "ping"  - checks the key; returns the Drive folder and Sheet links (the phone's "Test connection") and
+ *                    whether a reader is set up (reader: true/false)
  *   action "photo" - saves one JPEG to Drive  Packing Proof/<YYYY-MM>/<AWB>/   (TEST: Packing Proof/TEST/...)
  *                    and updates the box row(s) in the "Packing Proof" Sheet
  *   action "row"   - updates box row(s) only (readings, numbers to book, AWB, status, times)
@@ -12,17 +13,21 @@
  *   action "read"  - reads the weight or the bay scales from a photo with Claude (vision) and returns the numbers;
  *                    nothing is stored. The Anthropic API key lives only in Script Properties (ANTHROPIC_API_KEY)
  *
+ * The key is OPTIONAL. Without it the phone does not try to read: the reading photos are still saved and listed,
+ * the number columns stay empty, and the numbers can be filled in later from the photos (a cell the phone has no
+ * number for is never cleared, so a later fill stays).
+ *
  * Drive rules: it only CREATES. It never moves, renames, overwrites or deletes anything. A name that already
  * exists is skipped (same upload) or refused with code "name_taken" (the phone then uses the next number).
  *
  * Scopes: drive.file (the script sees just the folders and files it created itself) and external_request (the
  * call to api.anthropic.com). One-time setup: run setup() in the editor (creates the folder, the TEST folder, the
- * Sheet and the station key), add ANTHROPIC_API_KEY in Project Settings > Script properties, then
+ * Sheet and the station key), optionally add ANTHROPIC_API_KEY in Project Settings > Script properties, then
  * Deploy > New deployment > Web app, Execute as: Me, Who has access: Anyone. See README.md.
  */
 
 var PP = {
-  VERSION: '1.1.0',
+  VERSION: '1.2.0',
   ROOT_NAME: 'Packing Proof',
   TEST_NAME: 'TEST',
   SHEET_NAME: 'Packing Proof',
@@ -72,8 +77,11 @@ function retakes_(s) {
   Object.keys(KIND_COLS).forEach(function (k) { var p = s.photos && s.photos[k]; if (p && p.retakes) out = out.concat(p.retakes); });
   return out.join(' | ');
 }
-function rd_(f) { return function (s) { return num_(s.readings && s.readings[f]); }; }
-function bk_(f) { return function (s) { return num_(s.book && s.book[f]); }; }
+// A number the phone does not have (no reader, or not read) never clears a cell: it may have been filled in
+// later from the reading photos.
+function keep_(v) { return v === '' ? undefined : v; }
+function rd_(f) { return function (s) { return keep_(num_(s.readings && s.readings[f])); }; }
+function bk_(f) { return function (s) { return keep_(num_(s.book && s.book[f])); }; }
 
 var BOX_COLS = [
   ['Box ID', function (s) { return s.box_id; }],
@@ -105,7 +113,7 @@ var BOX_COLS = [
   ['App', function (s, req) { return req.app || ''; }],
   ['Team notes', function () { return undefined; }],   // people type here; the script never writes it
   // v1.1 (image-first): where each reading came from, the re-read of the proof photos, the reading photos.
-  ['Readings source', function (s) { return s.readings_source || ''; }],
+  ['Readings source', function (s) { return s.readings_source || undefined; }],
   ['Re-read check', function (s) { return s.reread || ''; }],
   ['Measure weight photo', photoUrl_('measure-scale')],
   ['Measure length-height photo', photoUrl_('measure-length-height')],
@@ -369,6 +377,7 @@ function ping_() {
     root: { id: ids.root, name: PP.ROOT_NAME, url: folderUrl_(ids.root) },
     test: { id: ids.test, url: folderUrl_(ids.test) },
     sheet: { id: ids.sheet, url: sheetUrl_(ids.sheet) },
+    reader: !!props_().getProperty('ANTHROPIC_API_KEY'),   // false: the phone leaves the numbers to be read later
   };
 }
 
