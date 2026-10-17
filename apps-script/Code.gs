@@ -27,7 +27,7 @@
  */
 
 var PP = {
-  VERSION: '1.3.0',
+  VERSION: '1.4.0',
   ROOT_NAME: 'Packing Proof',
   TEST_NAME: 'TEST',
   SHEET_NAME: 'Packing Proof',
@@ -35,7 +35,7 @@ var PP = {
   TAB_TEST: 'TEST boxes',
   TAB_FILES: 'Files',
   TAB_LOG: 'Station log',
-  MAX_BYTES: 2000000,
+  MAX_BYTES: 2000000,        // Shipmozo's limit per image (the proof-photo cap before v1.4)
   MAX_READ_BYTES: 8000000,
   TZ: 'Asia/Kolkata',
   FOLDER_MIME: 'application/vnd.google-apps.folder',
@@ -45,13 +45,15 @@ var PP = {
 // Proof photos (label, scale, length-height, breadth, boxes) plus the reading photos taken before the label
 // (measure-*, v1.3: weight, length, breadth, height), which the numbers to book are read from. sync.py counts only
 // the proof kinds as dispute images.
-var NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length-height|breadth|boxes|measure-scale|measure-length|measure-breadth|measure-height)-(\d{2})\.jpg$/;
+var NAME_RE = /^([A-Z0-9]{6,20})(?:-b(\d{1,2}))?-ours-(label|scale|length|breadth|height|length-height|boxes|measure-scale|measure-length|measure-breadth|measure-height)-(\d{2})\.jpg$/;
 var KIND_COLS = {
   'label': 'Label', 'breadth': 'Breadth', 'length-height': 'Length-height', 'scale': 'Scale', 'boxes': 'Boxes',
+  'length': 'Length', 'height': 'Height',
   'measure-scale': 'Measure weight', 'measure-length': 'Measure length', 'measure-breadth': 'Measure breadth', 'measure-height': 'Measure height',
 };
-// Proof photos go to Shipmozo (2 MB each); reading photos are kept at the camera's full resolution.
-function maxBytes_(kind) { return /^measure-/.test(kind) ? PP.MAX_READ_BYTES : PP.MAX_BYTES; }
+// v1.4: every photo is kept at the camera's full resolution (the numbers are read from them); the Shipmozo agent
+// makes its own copies under Shipmozo's 2 MB limit when it uploads them. (Before v1.4 proof photos were cut to 2 MB.)
+function maxBytes_(kind) { return PP.MAX_READ_BYTES; }
 
 // ------------------------------------------------------------------ the Sheet's columns
 // [header, value from (row snapshot, request)] - undefined keeps what the cell already holds.
@@ -126,6 +128,9 @@ var BOX_COLS = [
   // v1.3: the checks of each reading photo (camera used, size, sharpness), to compare ways of taking them.
   ['Checks measure weight', photoChecks_('measure-scale')], ['Checks measure length', photoChecks_('measure-length')],
   ['Checks measure breadth', photoChecks_('measure-breadth')], ['Checks measure height', photoChecks_('measure-height')],
+  // v1.4: one round after booking - weight ("Scale photo"), length, breadth, height, each with the label.
+  ['Length photo', photoUrl_('length')], ['Height photo', photoUrl_('height')],
+  ['Checks length', photoChecks_('length')], ['Checks height', photoChecks_('height')],
 ];
 var FILE_COLS = ['Uploaded', 'Test', 'AWB', 'Box', 'Kind', 'No.', 'File', 'Link', 'Bytes', 'Final when uploaded', 'Captured', 'Station', 'Phone', 'Upload ID'];
 var LOG_COLS = ['Logged', 'Test', 'Station', 'Type', 'Reading', 'Result', 'Notes', 'Phone', 'App', 'Entry ID'];
@@ -434,11 +439,22 @@ function tapeSpec_(what, where) {
     },
   };
 }
-var TAPE_FIELD = { 'measure-length': 'length', 'measure-breadth': 'breadth', 'measure-height': 'height' };
+var TAPE_FIELD = {
+  'measure-length': 'length', 'measure-breadth': 'breadth', 'measure-height': 'height',
+  'length': 'length', 'breadth': 'breadth', 'height': 'height',   // v1.4: the photos after booking (label in view)
+};
+var TAPE_AT = {
+  length: 'the parcel\'s end (or a flat board pressed against it) meets the tape',
+  breadth: 'the parcel\'s side at its widest point (or a flat board pressed against it) meets the tape',
+  height: 'a flat board laid across the parcel\'s highest point (or the top of the parcel) meets the upright tape',
+};
 var READ_SPECS = {
-  'measure-length': tapeSpec_('length', 'the parcel\'s end (or a flat board pressed against it) meets the tape'),
-  'measure-breadth': tapeSpec_('breadth', 'the parcel\'s side at its widest point (or a flat board pressed against it) meets the tape'),
-  'measure-height': tapeSpec_('height', 'a flat board laid across the parcel\'s highest point (or the top of the parcel) meets the upright tape'),
+  'measure-length': tapeSpec_('length', TAPE_AT.length),
+  'measure-breadth': tapeSpec_('breadth', TAPE_AT.breadth),
+  'measure-height': tapeSpec_('height', TAPE_AT.height),
+  'length': tapeSpec_('length', TAPE_AT.length),
+  'breadth': tapeSpec_('breadth', TAPE_AT.breadth),
+  'height': tapeSpec_('height', TAPE_AT.height),
   'scale': {
     ask: 'A parcel on a platform weighing scale. Read the weight on the scale\'s digital display exactly as shown, in kg, ' +
       'keeping every decimal. Also say whether the parcel rests only on the platform with both ends clear of the floor, ' +
@@ -467,7 +483,7 @@ var READ_SPECS = {
       },
     },
   },
-  'breadth': {
+  'bay-breadth': {   // the measuring station's fence photo (v1.0-1.3); kept for when the station exists
     ask: READ_BAY + 'BREADTH: a long low fence board lies along the front of the parcel, parallel to the back wall, ' +
       'touching its widest point. Read scale B1 and scale B2 where the fence\'s front face crosses them.' + READ_HALF,
     schema: {
@@ -529,7 +545,7 @@ function parseReadResponse_(kind, res) {
     if (o.length_readable && cleanReading_(o.length_cm)) values.length = cleanReading_(o.length_cm);
     if (o.height_readable && cleanReading_(o.height_cm)) values.height = cleanReading_(o.height_cm);
     confidence.length = o.length_confidence; confidence.height = o.height_confidence;
-  } else if (base === 'breadth') {
+  } else if (base === 'bay-breadth') {
     if (o.readable && cleanReading_(o.b1_cm)) values.b1 = cleanReading_(o.b1_cm);
     if (o.readable && cleanReading_(o.b2_cm)) values.b2 = cleanReading_(o.b2_cm);
     confidence.breadth = o.confidence;
