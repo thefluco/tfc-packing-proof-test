@@ -120,7 +120,17 @@ button.mini { min-height: 36px; padding: 4px 12px; font-size: 14px; border-radiu
 .review { position: absolute; inset: 0; background: rgba(0,0,0,.92); z-index: 4; display: flex; flex-direction: column; padding: 12px; gap: 10px; }
 .review img { flex: 1; min-height: 0; width: 100%; object-fit: contain; background: #111; border-radius: 10px; }
 .review .ok { color: #7ee2a8; font-weight: 700; font-size: 18px; }
+.review .ok.bad { color: #ff8a80; }
 .review .line { font-size: 13px; opacity: .85; }
+/* v1.3 camera-app mode: no live picture; the phone's own camera app takes the photo */
+.cam.file video, .cam.file canvas.ov, .cam.file .ring { display: none; }
+.cam .fileph { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 90px 22px 22px; text-align: center; }
+.cam .fileph .big { font-size: 20px; font-weight: 700; }
+.cam .fileph .small { opacity: .8; max-width: 30em; }
+.cam .fileph button { min-height: 64px; min-width: 240px; font-size: 20px; padding: 10px 26px; border-radius: 14px;
+  background: var(--go); border: 2px solid var(--go); color: #fff; }
+.cam .fileph button.ghost { min-height: 48px; font-size: 16px; background: transparent; border-color: rgba(255,255,255,.4); }
 
 #toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); background: #222; color: #fff; padding: 12px 16px;
   border-radius: 12px; font-size: 16px; max-width: 92vw; z-index: 50; opacity: 0; transition: opacity .2s; pointer-events: none; }
