@@ -272,10 +272,12 @@ export async function load(opts = {}) {
 
 // The test site's reader. The real backend calls the Anthropic API from Apps Script with a key in Script
 // Properties; here the same request is built and parsed by Code.gs, but sent from the browser with a key typed
-// on this device (Settings, test site only). Without a key, the demo camera's drawn values are returned.
-let readerKey = '';
+// on this device (Settings, test site only). Without a key there is no reader (the numbers are read later), except
+// in the computer demo, whose "demo reader" answers the drawn camera with the values it drew.
+let readerKey = '', demoReader = false;
 export function setReaderKey(k) { readerKey = String(k || '').trim(); }
 export function hasReaderKey() { return !!readerKey; }
+export function setDemoReader(on) { demoReader = !!on; }
 
 async function readAsync(g, payload) {
   const auth = JSON.parse(g.doPost({ postData: { contents: JSON.stringify({ v: 1, key: payload.key, action: 'ping' }) } }).getContent());
@@ -296,14 +298,14 @@ async function readAsync(g, payload) {
     return g.parseReadResponse_(payload.kind, json);
   }
   const t = payload.demo_truth;
-  if (t) {
+  if (t && demoReader) {
     await new Promise((r) => setTimeout(r, 700));
     const base = String(payload.kind).replace(/^measure-/, '');
     const values = base === 'scale' ? { weight: t.weight } : base === 'length-height' ? { length: t.length, height: t.height } : { b1: t.breadth, b2: t.breadth };
     const confidence = base === 'scale' ? { weight: 'high' } : base === 'length-height' ? { length: 'high', height: 'high' } : { breadth: 'high' };
     return { ok: true, kind: base, values, confidence, flags: {}, notes: 'demo camera: drawn values', model: 'demo' };
   }
-  return { ok: false, code: 'no_reader', error: 'No AI key on this test site yet (Settings)' };
+  return { ok: false, code: 'no_reader', error: 'No AI key on this test site (Settings) - the numbers are read later' };
 }
 
 // Same shape as uploader.postJSON: the request goes through JSON exactly as it would over HTTP.
@@ -313,7 +315,10 @@ export async function post(url, payload) {
   await new Promise((r) => setTimeout(r, 5));
   const out = g.doPost({ postData: { contents: JSON.stringify(payload), type: 'text/plain' } });
   if (persist) await saveState();
-  return JSON.parse(out.getContent());
+  const res = JSON.parse(out.getContent());
+  // The test site's reader is the key typed on this device (or the demo reader), not a Script Property.
+  if (payload && payload.action === 'ping' && res.ok && !res.reader) res.reader = hasReaderKey() || demoReader;
+  return res;
 }
 
 // Inspection helpers for tests.
