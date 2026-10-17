@@ -106,9 +106,12 @@ function tabOf(id, title) {
   if (!t) throw new Error('Unable to parse range: ' + title);
   return t;
 }
+// Like a real Sheet, a tab is 26 columns wide until columns are added (appendDimension); writing past that fails.
+const colsOf = (t) => t.cols || 26;
 function write(t, r0, c0, values) {
   values.forEach((row, i) => {
     const r = r0 - 1 + i;
+    if (c0 - 1 + row.length > colsOf(t)) throw new Error(`Range (${t.title}) exceeds grid limits. Max columns: ${colsOf(t)}`);
     while (t.grid.length <= r) t.grid.push([]);
     row.forEach((v, j) => { t.grid[r][c0 - 1 + j] = v; });
   });
@@ -117,13 +120,17 @@ const Sheets = {
   Spreadsheets: {
     get(id) {
       const ss = state.sheets.get(id);
-      return { sheets: ss.tabs.map((t, i) => ({ properties: { sheetId: t.gid, title: t.title, index: i } })) };
+      return { sheets: ss.tabs.map((t, i) => ({ properties: { sheetId: t.gid, title: t.title, index: i, gridProperties: { rowCount: 1000, columnCount: colsOf(t) } } })) };
     },
     batchUpdate(res, id) {
       const ss = state.sheets.get(id), replies = [];
       for (const r of res.requests) {
-        if (r.addSheet) {
-          const t = { gid: ss.tabs.length * 1000 + 7, title: r.addSheet.properties.title, grid: [], frozen: 0, bold: false };
+        if (r.appendDimension) {
+          const t = ss.tabs.find((x) => x.gid === r.appendDimension.sheetId);
+          if (r.appendDimension.dimension === 'COLUMNS') t.cols = colsOf(t) + r.appendDimension.length;
+          replies.push({});
+        } else if (r.addSheet) {
+          const t = { gid: ss.tabs.length * 1000 + 7, title: r.addSheet.properties.title, grid: [], frozen: 0, bold: false, cols: 26 };
           ss.tabs.push(t); replies.push({ addSheet: { properties: { sheetId: t.gid, title: t.title } } });
         } else if (r.updateSheetProperties) {
           const p = r.updateSheetProperties.properties, t = ss.tabs.find((x) => x.gid === p.sheetId);
@@ -249,8 +256,9 @@ export async function load(opts = {}) {
   const src = new URL('../apps-script/Code.gs', import.meta.url);
   const code = await (await fetch(src, { cache: 'no-store' })).text();
   const factory = new Function('Drive', 'Sheets', 'Utilities', 'ContentService', 'LockService', 'PropertiesService', 'CacheService', 'UrlFetchApp', 'console',
-    code + '\nreturn { doPost: doPost, doGet: doGet, setup: setup, newStationKey: newStationKey, PP: PP, BOX_COLS: BOX_COLS,' +
-    ' buildReadRequest_: buildReadRequest_, parseReadResponse_: parseReadResponse_ };');
+    code + '\nreturn { doPost: doPost, doGet: doGet, setup: setup, selfTest: selfTest, newStationKey: newStationKey, PP: PP, BOX_COLS: BOX_COLS,' +
+    ' PRE_COLS: PRE_COLS, buildReadRequest_: buildReadRequest_, parseReadResponse_: parseReadResponse_, normOrder_: normOrder_,' +
+    ' lookup_: lookup_, ensureCheckTab_: ensureCheckTab_ };');
   gas = factory(Drive, Sheets, Utilities, ContentService, LockService, PropertiesService, CacheService, UrlFetchApp, harnessConsole);
   persist = !!opts.persist;
   const restored = persist && await restoreState().catch(() => false);
@@ -301,8 +309,10 @@ async function readAsync(g, payload) {
   if (t && demoReader) {
     await new Promise((r) => setTimeout(r, 700));
     const base = String(payload.kind).replace(/^measure-/, '');
-    const values = base === 'scale' ? { weight: t.weight } : base === 'length-height' ? { length: t.length, height: t.height } : { b1: t.breadth, b2: t.breadth };
-    const confidence = base === 'scale' ? { weight: 'high' } : base === 'length-height' ? { length: 'high', height: 'high' } : { breadth: 'high' };
+    const one = { 'measure-length': 'length', 'measure-breadth': 'breadth', 'measure-height': 'height',
+      length: 'length', breadth: 'breadth', height: 'height' }[payload.kind];   // tape photos (v1.3 reading, v1.4 after booking)
+    const values = one ? { [one]: t[one] } : base === 'scale' ? { weight: t.weight } : base === 'length-height' ? { length: t.length, height: t.height } : { b1: t.breadth, b2: t.breadth };
+    const confidence = one ? { [one]: 'high' } : base === 'scale' ? { weight: 'high' } : base === 'length-height' ? { length: 'high', height: 'high' } : { breadth: 'high' };
     return { ok: true, kind: base, values, confidence, flags: {}, notes: 'demo camera: drawn values', model: 'demo' };
   }
   return { ok: false, code: 'no_reader', error: 'No AI key on this test site (Settings) - the numbers are read later' };
@@ -331,6 +341,35 @@ export function rows(title) {
   if (!t || !t.grid.length) return [];
   const head = t.grid[0];
   return t.grid.slice(1).map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] === undefined ? '' : r[i]])));
+}
+
+// The "Check before pickup" tabs hold two formulas (Code.gs ensureCheckTab_). The fake Sheet stores formulas as
+// text, so this evaluates exactly that shape: A1 = the header row of the source tab, A2 = FILTER(rows, column X is
+// not empty, column Y is not "done"). Returns the rows as objects, as rows() does.
+export function evalCheckTab(title) {
+  const t = tab(title);
+  if (!t) throw new Error('no tab ' + title);
+  const f1 = String((t.grid[0] || [])[0] || ''), f2 = String((t.grid[1] || [])[0] || '');
+  const m1 = /^=\{'((?:''|[^'])+)'!A1:([A-Z]+)1\}$/.exec(f1);
+  const m2 = /^=IFERROR\(FILTER\('((?:''|[^'])+)'!A2:([A-Z]+), '(?:''|[^'])+'!([A-Z]+)2:\3<>"", '(?:''|[^'])+'!([A-Z]+)2:\4<>"done"\), ""\)$/.exec(f2);
+  if (!m1 || !m2) throw new Error('unexpected formulas: ' + f1 + ' / ' + f2);
+  const src = tab(m2[1].replace(/''/g, "'")), num = (c) => [...c].reduce((n, ch) => n * 26 + ch.charCodeAt(0) - 64, 0);
+  const width = num(m1[2]), head = (src.grid[0] || []).slice(0, width), awb = num(m2[3]) - 1, ps = num(m2[4]) - 1;
+  return src.grid.slice(1).filter((r) => String(r[awb] ?? '') !== '' && String(r[ps] ?? '') !== 'done')
+    .map((r) => Object.fromEntries(head.map((h, i) => [h, r[i] === undefined ? '' : r[i]])));
+}
+
+// Stands in for the booking step (the operator now, Claude later), which is not part of the app: writes the booked
+// AWB (and, optionally, a box's own AWB and the order number the batch read found) into a Pre-booking row, by header.
+export async function bookPre(test, boxId, { awb, boxAwb = '', order = '', by = 'test operator' }) {
+  const t = tab(test ? 'TEST pre-booking' : 'Pre-booking'), head = t.grid[0], idI = head.indexOf('Box ID');
+  const row = t.grid.slice(1).find((r) => r[idI] === boxId);
+  if (!row) throw new Error('no Pre-booking row ' + boxId);
+  const set = (h, v) => { const i = head.indexOf(h); if (i < 0) throw new Error('no column ' + h); row[i] = v; };
+  set('AWB', awb); set('Box AWB', boxAwb); set('Status', 'booked'); set('Booked by', by);
+  set('Booked at', new Date(Date.now() + 330 * 60000).toISOString().slice(0, 19).replace('T', ' '));
+  if (order) set('Order no.', order);
+  if (persist) await saveState();
 }
 export function pathOf(id) {
   const out = [];
