@@ -1,13 +1,13 @@
 // Service worker: keeps the app working with no network (the upload queue lives in IndexedDB), and holds the
 // order-number reader (Tesseract.js, about 7 MB) so it is downloaded once.
 // Bump VERSION with every release so phones pick up the new files.
-const VERSION = 'pp-test-20261017-2022';
+const VERSION = 'pp-live-20261017-2229';
 const VENDOR = 'pp-vendor';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/main.js', 'js/config.js', 'js/logic.js', 'js/quality.js', 'js/exif.js', 'js/still-worker.js', 'js/store.js',
   'js/records.js', 'js/uploader.js', 'js/barcode.js', 'js/demo.js', 'js/ocr.js', 'js/sound.js', 'js/strings.js', 'js/drawings.js',
-  'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png', 'test-backend/gas-harness.js', 'apps-script/Code.gs',
+  'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',
 ];
 // The reader: stored with the app, kept across releases (its own cache), fetched once at install. The plain-LSTM
 // core is only for phones without WebAssembly SIMD; it is cached the first time such a phone asks for it.
