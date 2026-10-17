@@ -5,7 +5,7 @@ export const APP_VERSION = '2.0.0';
 
 // The Apps Script web-app URL (.../exec). Not a secret: the script refuses anything without the station key.
 // Fill it in before uploading to GitHub Pages, or paste it in Settings on the phone (Settings wins).
-export const DEFAULT_SCRIPT_URL = '';
+export const DEFAULT_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbzGZBe_9-SrDzbniZrZ2Afjspl8IZpLGvm-Fxr9gXqBM-wiFeV8H5-0JLWWrxXCl3eX/exec';
 
 // v2 (owner, 17 Oct): two stages, and the first photo picks the stage.
 //  MEASURE (blue), before booking: per box the packing slip, then weight, length, breadth, height. The numbers are
@@ -52,5 +52,5 @@ export const DEMO_ORDER = 'TFC-001599991';    // the made-up slip of the demo ca
 
 // Test backend: Code.gs run in the browser on a fake Drive and Sheet (nothing reaches Google).
 // In the workspace it is used only with ?harness=1. tests/make_test_site.py builds a TEST site where it is always on.
-export const TEST_SITE = true;
-export const TEST_BACKEND = '../test-backend/gas-harness.js';   // relative to js/main.js
+export const TEST_SITE = false;
+export const TEST_BACKEND = '../../tests/gas-harness.js';   // relative to js/main.js

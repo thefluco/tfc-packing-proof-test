@@ -289,6 +289,7 @@ async function doRender() {
       case 'boxdone': return await screenBoxDone(a);
       case 'done': return await screenDone(a);
       case 'aside': return await screenAside(a);
+      case 'redo': return await screenRedo(a, b);
       case 'sup': return supOk() ? await screenSup() : screenPin('#/sup');
       case 'settings': return !app.settings.setupDone || supOk() ? await screenSettings() : screenPin('#/settings');
       case 'queue': return supOk() ? await screenQueue() : screenPin('#/queue');
@@ -494,7 +495,7 @@ async function afterSlip(s, b, o, order) {
   return showRetake({
     stage: 'measure', side: boxSide(s, b), reasons: ['slip'], preview: null, fails: b.fails.slip,
     again: () => go(`#/step/${enc(s.id)}/${enc(b.id)}/slip`),
-    use: async () => { await flagBox(b, 'slip order number not read on the phone after 2 tries'); await rowsOf(s); go(`#/step/${enc(s.id)}/${enc(b.id)}/scale`); },
+    use: async () => { await flagBox(b, 'slip order number not read on the phone after 2 tries'); await rowsOf(s); afterPhoto(s.id); },
   });
 }
 
@@ -509,9 +510,9 @@ function showSlipOk(s, b, order) {
         <div class="sound" style="color:var(--proof-ink)">${I.speaker(20)}<span>${hh('short_beep')} · <span lang="en">${ee('short_beep')}</span></span></div></section>
       <div class="waitline">${I.info(20)}<span>${hh('only_check')} · <span lang="en">${ee('only_check')}</span></span></div>
     </main>
-    <footer style="padding-top:0">${nextBtnHtml('measure', 'scale')}
+    <footer style="padding-top:0">${nextBtnHtml('measure', nextOf(s, b, 'slip'))}
       <button class="smallbtn measure" id="retake">${hh('retake')} · <span lang="en">${ee('retake')}</span></button></footer></div>`);
-  $('#next').onclick = () => go(`#/step/${enc(s.id)}/${enc(b.id)}/scale`);
+  $('#next').onclick = () => afterPhoto(s.id);
   $('#retake').onclick = () => go(`#/step/${enc(s.id)}/${enc(b.id)}/slip`);
 }
 
@@ -519,13 +520,17 @@ function showNoReader(s, b) {
   const [a, bb] = boxSide(s, b);
   view(`<div class="scr measure-ink">${bandHtml('measure', a, bb)}${dotsHtml(s, b, 'scale')}
     <main style="justify-content:center;padding:18px"><div class="note amber">${I.info(24)}<div><div class="h">${hh('no_reader')}</div><div class="e" lang="en">${ee('no_reader')}</div></div></div></main>
-    <footer>${nextBtnHtml('measure', 'scale')}</footer></div>`);
-  $('#next').onclick = () => go(`#/step/${enc(s.id)}/${enc(b.id)}/scale`);
+    <footer>${nextBtnHtml('measure', nextOf(s, b, 'slip'))}</footer></div>`);
+  $('#next').onclick = () => afterPhoto(s.id);
 }
 
+// The step this box still needs after `after` (the first one in the step order), or '' when it has none left.
+function nextOf(s, b, after) { return R.kindsOf(s).find((k) => k !== after && R.needs(b, k)) || ''; }
+
 function nextBtnHtml(stage, kind, cls = '') {
-  const w = stepWord(kind);
-  return `<button class="bigbtn ${cls || stage}" id="next"><span class="tx"><span class="a">${esc(t('next_step', { step: w.hi }).hi)}</span><span class="b" lang="en">${esc(t('next_step', { step: w.en }).en)}</span></span>${I.arrow(40)}</button>`;
+  const w = kind ? stepWord(kind) : null;
+  const a = w ? t('next_step', { step: w.hi }).hi : t('next').hi, b = w ? t('next_step', { step: w.en }).en : t('next').en;
+  return `<button class="bigbtn ${cls || stage}" id="next"><span class="tx"><span class="a">${esc(a)}</span><span class="b" lang="en">${esc(b)}</span></span>${I.arrow(40)}</button>`;
 }
 
 function showAlreadyMeasured(s, b, order, dup) {
@@ -562,7 +567,9 @@ async function screenBoxDone(sid) {
       <div><div style="font-size:34px;font-weight:700;line-height:1.15">${hh('box_done', { n: b.n })}</div><div lang="en" style="font-size:17px;color:var(--muted)">${ee('box_done', { n: b.n })}</div></div>
       <div class="note" style="flex-direction:column;gap:4px"><div class="h">${hh('sending', { n })}</div><div class="h">${hh('read_office')}</div><div class="e" lang="en">${ee('sending', { n })} · ${ee('read_office')}</div></div></main>
     <footer style="padding-top:0"><button class="midbtn measure" id="nextbox">${I.plusBox(34)}<span class="tx"><span class="a">${hh('next_box')}</span><span class="b" lang="en">${ee('next_box')}</span></span></button>
-      <button class="bigbtn measure" id="nextparcel"><span class="tx"><span class="a">${hh('next_parcel')}</span><span class="b" lang="en">${ee('next_parcel')}</span></span>${I.arrow(40)}</button></footer></div>`);
+      <button class="bigbtn measure" id="nextparcel"><span class="tx"><span class="a">${hh('next_parcel')}</span><span class="b" lang="en">${ee('next_parcel')}</span></span>${I.arrow(40)}</button>
+      ${redoBtn(s.id, 'measure', location.hash)}</footer></div>`);
+  wireRedo();
   $('#nextbox').onclick = async () => {
     const nb = await R.addMeasureBox(s);
     await rowsChanged(s, [...boxes, nb]);
@@ -723,8 +730,8 @@ function showMatch(s, b, order) {
       <div class="pair"><div><span class="k">${hh('slip')} · <span lang="en" style="font-weight:400">${ee('slip')}</span></span><span class="v mono" lang="en">${esc(order)}</span></div>
         <div><span class="k">${hh('label')} · <span lang="en" style="font-weight:400">${ee('label')}</span></span><span class="v mono" lang="en">${esc(order)}</span></div></div>
       <div class="sound">${I.speaker(20)}<span>${hh('short_beep')} · <span lang="en">${ee('short_beep')}</span></span></div></main>
-    <footer>${nextBtnHtml('proof', 'scale', 'white proof-t')}</footer></div>`);
-  $('#next').onclick = () => go(`#/step/${enc(s.id)}/${enc(b.id)}/scale`);
+    <footer>${nextBtnHtml('proof', nextOf(s, b, 'label'), 'white proof-t')}</footer></div>`);
+  $('#next').onclick = () => afterPhoto(s.id);
 }
 
 // S13
@@ -766,8 +773,8 @@ function showCheckSkipped(s, b, notBooked) {
     <main style="justify-content:center;padding:18px"><div class="note amber">${I.info(24)}<div>
       <div class="h">${hh(notBooked ? 'not_booked' : 'check_skipped')}</div><div class="h">${hh('not_booked_do')}</div>
       <div class="e" lang="en">${ee(notBooked ? 'not_booked' : 'check_skipped')}: ${ee('not_booked_do')}</div></div></div></main>
-    <footer>${nextBtnHtml('proof', 'scale')}</footer></div>`);
-  $('#next').onclick = () => go(`#/step/${enc(s.id)}/${enc(b.id)}/scale`);
+    <footer>${nextBtnHtml('proof', nextOf(s, b, 'label'))}</footer></div>`);
+  $('#next').onclick = () => afterPhoto(s.id);
 }
 
 // PROOF done
@@ -779,8 +786,73 @@ async function screenDone(sid) {
     <main><div class="disc" style="width:128px;height:128px;background:#fff;color:var(--proof)">${I.check(76)}</div>
       <div><div class="res-a">${hh('all_done')}</div><div class="res-b" lang="en">${ee('all_done')}</div></div>
       <div class="pair"><div><span class="k">AWB</span><span class="v mono" lang="en">${esc(s.awb || '')}</span></div></div></main>
-    <footer><button class="bigbtn white proof-t" id="next"><span class="tx"><span class="a">${hh('next_parcel')}</span><span class="b" lang="en">${ee('next_parcel')}</span></span>${I.arrow(40)}</button></footer></div>`);
+    <footer><button class="bigbtn white proof-t" id="next"><span class="tx"><span class="a">${hh('next_parcel')}</span><span class="b" lang="en">${ee('next_parcel')}</span></span>${I.arrow(40)}</button>
+      ${redoBtn(s.id, 'proof', location.hash).replace('smallbtn proof', 'smallbtn proof" style="background:transparent;color:#fff;border-color:#fff')}</footer></div>`);
   $('#next').onclick = () => go('#/');
+  wireRedo();
+}
+
+// ---------------------------------------------------------------- redo: a photo, a box, or every box
+// Staff tap the photos to take again (any box), or "Restart box n" / "Restart all boxes", then one button. The new
+// photos become the final ones; the old ones stay in Drive and the Sheet as retakes, and the box notes the redo.
+function redoBtn(sid, stage, back = '') {
+  return `<button class="smallbtn ${stage}" id="redo" data-go="#/redo/${enc(sid)}${back ? '/' + enc(back) : ''}">↺ ${hh('redo_btn')} · <span lang="en" style="font-weight:400">${ee('redo_btn')}</span></button>`;
+}
+function wireRedo() { const r = $('#redo'); if (r) r.onclick = () => go(r.dataset.go); }
+const hasPhotos = (s, boxes) => boxes.some((b) => Object.values(b.photos).some((l) => l.length)) || s.boxes_photo.length > 0;
+
+async function screenRedo(sid, back) {
+  const d = await R.load(sid);
+  if (!d || d.s.cancelled_at || d.s.kept_aside) return go('#/');
+  const { s, boxes } = d, stage = R.stageOf(s), kinds = R.kindsOf(s), multi = boxes.length > 1;
+  const sel = new Map(boxes.map((b) => [b.id, new Set()]));
+  let selBoxes = false;
+  const tile = (b, k) => {
+    const done = b.photos[k] && b.photos[k].length > 0, w = stepWord(k);
+    return `<button class="rtile ${done ? 'done' : ''}" data-b="${esc(b.id)}" data-k="${k}" ${done ? '' : 'disabled'}>${I[k](24)}<span>${esc(w.hi)}</span><span class="tag" lang="en">${esc(w.en)}</span></button>`;
+  };
+  view(`<div class="scr ${stage}-ink">${bandHtml(stage)}
+    <main style="gap:12px">
+      <div><h1 class="ttl" style="font-size:27px">${hh('redo_title')}</h1><div class="ttl-en" lang="en">${ee('redo_title')}</div></div>
+      <div class="waitline">${I.info(20)}<span>${hh('redo_tap')} · <span lang="en">${ee('redo_tap')}</span></span></div>
+      ${boxes.map((b) => `<section class="rbox"><div class="hd">${hh('box_n', { n: b.n })} · <span lang="en" style="font-weight:400;font-size:15px">${ee('box_n', { n: b.n })}</span></div>
+        <div class="rtiles">${kinds.map((k) => tile(b, k)).join('')}</div>
+        <button class="smallbtn ${stage}" data-all="${esc(b.id)}" ${hasPhotos(s, [b]) ? '' : 'disabled'}>${hh('restart_box', { n: b.n })} · <span lang="en" style="font-weight:400">${ee('restart_box', { n: b.n })}</span></button></section>`).join('')}
+      ${R.needsBoxesPhoto(s, boxes) && s.boxes_photo.length ? `<section class="rbox"><div class="rtiles" style="grid-template-columns:1fr"><button class="rtile done" id="rboxes">${I.boxes(24)}<span>${esc(stepWord('boxes').hi)}</span><span class="tag" lang="en">${esc(stepWord('boxes').en)}</span></button></div></section>` : ''}
+      ${multi ? `<button class="midbtn amber" id="rall"><span class="tx" style="align-items:center"><span class="a" style="font-size:19px">${hh('restart_all')}</span><span class="b" lang="en">${ee('restart_all')}</span></span></button>` : ''}
+      <div class="waitline">${I.sheet(20)}<span>${hh('old_kept')} · <span lang="en">${ee('old_kept')}</span></span></div>
+    </main>
+    <footer><button class="bigbtn ${stage}" id="rgo" disabled>${I.again(40)}<span class="tx"><span class="a" style="font-size:26px">${hh('redo_go')}</span><span class="b" lang="en">${ee('redo_go')}</span></span></button>
+      <button class="smallbtn ${stage}" id="rback">${hh('back')} · <span lang="en" style="font-weight:400">${ee('back')}</span></button></footer></div>`);
+  const paint = () => {
+    for (const el of document.querySelectorAll('.rtile[data-k]')) el.classList.toggle('sel', sel.get(el.dataset.b).has(el.dataset.k));
+    const bx = $('#rboxes'); if (bx) bx.classList.toggle('sel', selBoxes);
+    $('#rgo').disabled = ![...sel.values()].some((x) => x.size) && !selBoxes;
+  };
+  for (const el of document.querySelectorAll('.rtile[data-k]')) el.onclick = () => { const set = sel.get(el.dataset.b); if (set.has(el.dataset.k)) set.delete(el.dataset.k); else set.add(el.dataset.k); paint(); };
+  for (const el of document.querySelectorAll('[data-all]')) el.onclick = () => {
+    const b = boxes.find((x) => x.id === el.dataset.all), set = sel.get(b.id), done = kinds.filter((k) => b.photos[k] && b.photos[k].length);
+    const all = done.every((k) => set.has(k));
+    for (const k of done) { if (all) set.delete(k); else set.add(k); }
+    paint();
+  };
+  const bx = $('#rboxes'); if (bx) bx.onclick = () => { selBoxes = !selBoxes; paint(); };
+  const ra = $('#rall'); if (ra) ra.onclick = () => {
+    const allNow = boxes.every((b) => kinds.filter((k) => b.photos[k] && b.photos[k].length).every((k) => sel.get(b.id).has(k)));
+    for (const b of boxes) for (const k of kinds) if (b.photos[k] && b.photos[k].length) { if (allNow) sel.get(b.id).delete(k); else sel.get(b.id).add(k); }
+    if (R.needsBoxesPhoto(s, boxes) && s.boxes_photo.length) selBoxes = !allNow;
+    paint();
+  };
+  $('#rback').onclick = () => go(back || '#/');
+  $('#rgo').onclick = async () => {
+    const items = boxes.map((b) => ({ box: b, kinds: kinds.filter((k) => sel.get(b.id).has(k)) })).filter((x) => x.kinds.length);
+    await R.markRedo(s, items, { boxesPhoto: selBoxes });
+    const d2 = await R.load(sid);
+    await rowsChanged(d2.s, d2.boxes);
+    const nx = R.nextStep(d2.s, d2.boxes);
+    if (nx.screen === 'step') return go(`#/step/${enc(sid)}/${nx.box ? enc(nx.box.id) : 'all'}/${nx.kind}`);
+    return go('#/');
+  };
 }
 
 // ---------------------------------------------------------------- the photo steps (S3, S5-S8, S11, all boxes)
@@ -808,15 +880,16 @@ async function screenStep(sid, bid, kind) {
   const shared = proof && kind === 'label' && boxes.length > 1 && !boxes.some((x) => x.box_awb && x.box_awb !== s.awb);
   const head = proof && kind === 'label' && s.order_no ? `<div class="chipline">${I.boxes(22)}<span><b>${hh('from_booking', { order: s.order_no, n: boxes.length })}</b> · <span lang="en">${ee('from_booking')}</span></span></div>` : '';
   const chooser = shared ? `<div class="note" style="flex-direction:column;gap:8px"><div class="h">${hh('which_box')} · <span lang="en" class="e">${ee('which_box')}</span></div>
-      <div class="boxpick">${boxes.map((x) => `<button data-b="${esc(x.id)}" class="${b && x.id === b.id ? 'on' : ''}" ${x.photos.label.length ? 'disabled' : ''}>${hh('box_n', { n: x.n })}</button>`).join('')}</div></div>` : '';
+      <div class="boxpick">${boxes.map((x) => `<button data-b="${esc(x.id)}" class="${b && x.id === b.id ? 'on' : ''}" ${R.needs(x, 'label') ? '' : 'disabled'}>${hh('box_n', { n: x.n })}</button>`).join('')}</div></div>` : '';
   const [sa, sb] = kind === 'boxes' ? ['', ''] : boxSide(s, b);
   view(`<div class="scr ${stage}-ink">${bandHtml(stage, sa, sb)}${kind === 'boxes' ? '' : dotsHtml(s, b, kind)}${demoBar()}
     <main>${head}
       <div><h1 class="ttl">${hh(info.title)}</h1><div class="ttl-en" lang="en">${ee(info.title)}</div></div>
       <figure class="fig">${info.draw(proof)}<figcaption>${info.caption ? `${hh(info.caption)} · <span lang="en">${ee(info.caption)}</span>` : `${hh('like_this')} · <span lang="en">${ee('like_this')}</span>`}</figcaption></figure>
       ${chooser}${stepsHtml(info.lines(proof))}</main>
-    <footer>${bigBtn('take', 'take_photo', stage)}</footer></div>`);
+    <footer>${bigBtn('take', 'take_photo', stage)}${hasPhotos(s, boxes) ? redoBtn(s.id, stage, location.hash) : ''}</footer></div>`);
   wireDemoBar();
+  wireRedo();
   for (const el of document.querySelectorAll('[data-b]')) el.onclick = () => go(`#/step/${enc(sid)}/${enc(el.dataset.b)}/label`);
   $('#take').onclick = () => {
     if (app.busy) return;
@@ -1024,7 +1097,7 @@ async function screenSup() {
   const item = (id, icon, key, color = 'var(--muted)') => `<button class="supbtn" id="${id}"><span style="color:${color}">${icon}</span><span><span class="a">${hh(key)}</span><span class="b" lang="en">${ee(key)}</span></span></button>`;
   view(`<div class="bar"><span>${I.lock(26)}</span><h1>${hh('supervisor')} · <span lang="en" style="font-weight:400;font-size:14px">${ee('supervisor')}</span></h1><a href="#/" id="exit">${hh('exit')} · Exit</a></div>
     <div class="adm">
-      ${item('awb', I.keyboard(28), 'sup_awb')}${item('release', I.release(28), 'sup_release', '#8a5300')}${item('boxes', I.plusBox(28), 'sup_boxes')}${item('cancel', I.cancel(28), 'sup_cancel', 'var(--stop)')}
+      ${item('awb', I.keyboard(28), 'sup_awb')}${item('release', I.release(28), 'sup_release', '#8a5300')}${item('boxes', I.plusBox(28), 'sup_boxes')}${item('cancel', I.cancel(28), 'sup_cancel', 'var(--stop)')}${item('supredo', I.again(28), 'sup_redo')}
       <div class="card"><span class="a" style="display:block;font-size:19px;font-weight:600">${hh('sup_lock')}</span><span class="small muted" lang="en">${ee('sup_lock')}</span>
         <div class="lockrow" style="margin-top:10px">${lockBtn('', 'lock_none', 'var(--ink)')}${lockBtn('measure', 'measure_chip', 'var(--measure)')}${lockBtn('proof', 'proof_chip', 'var(--proof)')}</div></div>
       ${item('settings', I.gear(28), 'sup_settings')}
@@ -1043,6 +1116,13 @@ async function screenSup() {
   $('#release').onclick = supRelease;
   $('#boxes').onclick = supBoxes;
   $('#cancel').onclick = supCancel;
+  $('#supredo').onclick = async () => {
+    const s = await pickRecord('Redo photos of which parcel?', (x) => !x.cancelled_at && !x.kept_aside && istDay(new Date(x.created_at)) === istDay());
+    if (!s) return;
+    await supLog('redo photos', s, '');
+    app.supUntil = 0;
+    go(`#/redo/${enc(s.id)}`);
+  };
 }
 
 async function supTypeAwb() {
@@ -1226,12 +1306,77 @@ async function screenQueue() {
   const when = (ms) => (ms ? new Date(ms).toTimeString().slice(0, 8) : 'now');
   view(`<div class="bar"><a href="#/sup">&#8249;</a><h1>Uploads</h1></div><div class="adm">
     <button class="wide primary" id="retry">Retry all now</button>
+    ${shareCard((await db.all('photos')).filter((p) => p.blob).length)}
     <h2>Waiting (${q.length})</h2>
     ${q.map((i) => `<div class="card small"><b>${esc(i.type)}</b> ${esc(i.photo_id || i.box_id || i.log_id || '')}<br>tries ${i.tries || 0} · next ${when(i.next)}${i.error ? `<br><span style="color:var(--bad)">${esc(i.error)}</span>` : ''}</div>`).join('') || '<p class="muted">Nothing waiting.</p>'}
     <h2>Recent photos</h2>
     ${photos.map((p) => `<div class="card small"><b>${esc(p.name || '(waiting for an AWB)')}</b> · ${Math.round((p.bytes || 0) / 1024)} KB · ${esc(p.upload.state)}${p.upload.url ? ` · <a href="${esc(p.upload.url)}" target="_blank" rel="noopener">Drive</a>` : ''}${p.upload.error ? ` · ${esc(p.upload.error)}` : ''}</div>`).join('') || '<p class="muted">No photos yet.</p>'}
   </div>`);
   $('#retry').onclick = async () => { await app.uploader.retryNow(); render(); };
+  wireShare();
+}
+
+// ---------------------------------------------------------------- export this phone's records for the office
+// One text file (the records and photo checks on this phone, the upload queue, and on the TEST site the stand-in
+// Sheet's tabs) and, optionally, every photo still on the phone. Works in every build (Supervisor > Uploads).
+// Settings are reduced to what explains the run: never the station key, the PIN or its hash.
+async function phoneDataFiles(withPhotos) {
+  const h = app.harness, sheet = {};
+  if (h) {
+    for (const tab of ['TEST pre-booking', 'TEST boxes', 'Files', 'Station log', 'Pre-booking', 'Boxes']) { try { sheet[tab] = h.rows(tab); } catch { sheet[tab] = []; } }
+    for (const tab of ['TEST check before pickup', 'Check before pickup']) { try { sheet[tab] = h.evalCheckTab(tab); } catch { sheet[tab] = []; } }
+  }
+  const records = [];
+  for (const s of (await db.all('shipments')).sort((a, b) => a.created_at.localeCompare(b.created_at))) {
+    const d = await R.load(s.id);
+    if (!d) continue;
+    records.push({
+      record: d.s, boxes: d.boxes, next: R.nextStep(d.s, d.boxes).screen,
+      photos: Object.values(d.byId).sort((a, b) => (a.captured_at || '').localeCompare(b.captured_at || '')).map((p) => ({
+        name: p.name, kind: p.kind, box: p.box_n, nn: p.nn, bytes: p.bytes, size: `${p.width}x${p.height}`, captured_at: p.captured_at,
+        checks: checksLine(p.checks), upload: p.upload && p.upload.state,
+      })),
+    });
+  }
+  const st = app.settings;
+  const summary = {
+    exported_at: isoLocal(), app: APP_VERSION, test_site: TEST_SITE, user_agent: navigator.userAgent,
+    settings: { station: st.station, test: st.test, demo: st.demo, lock: st.lock, phoneMake: st.phoneMake, phoneModel: st.phoneModel, levels: st.levels },
+    reader: { status: ocr.state.status, loadMs: ocr.state.loadMs, error: ocr.state.error }, barcode_engine: barcode.engine,
+    queue_waiting: (await db.all('queue')).length, held_for_real_backend: app.heldReal || 0, backend: h ? 'TEST site stand-in' : 'real (Apps Script)', sheet, records,
+  };
+  const stamp = isoLocal().slice(0, 16).replace(/[-:T]/g, '');
+  const files = [new File([JSON.stringify(summary, null, 1)], `packing-proof-${h ? 'test-' : ''}data-${stamp}.txt`, { type: 'text/plain' })];
+  if (withPhotos) {
+    for (const p of (await db.all('photos')).sort((a, b) => (a.captured_at || '').localeCompare(b.captured_at || ''))) {
+      if (p.blob) files.push(new File([p.blob], p.name || `${p.shipment_id}-b${p.box_n || 0}-${p.kind}-${String(p.nn).padStart(2, '0')}-unnamed.jpg`, { type: 'image/jpeg' }));
+    }
+  }
+  return files;
+}
+
+// The share menu (or, on a computer, a saved summary file).
+async function shareData(withPhotos, out) {
+  out.textContent = 'Preparing...';
+  try {
+    const files = await phoneDataFiles(withPhotos);
+    if (navigator.canShare && navigator.canShare({ files })) {
+      await navigator.share({ files, title: 'Packing Proof data', text: `Packing Proof data from ${app.settings.station}, ${files.length} file(s)` });
+      out.textContent = 'Shared.';
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(files[0]); a.download = files[0].name; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      out.textContent = 'This browser has no share menu: the summary was saved as a file.';
+    }
+  } catch (e) { out.textContent = e.name === 'AbortError' ? 'Not shared.' : 'Could not share: ' + e.message; }
+}
+const shareCard = (n) => `<div class="card"><b>Send this phone's records to the office</b><p class="small">A summary (the records on this phone, each photo's checks${app.harness ? ', the stand-in Sheet' : ''}) and the ${n} photos still on the phone, through the share menu: for example "Save to Drive" or email. Never the station key or the PIN.</p>
+  <div class="row"><button class="primary" id="shareall">Share summary + photos</button><button id="sharesum">Share the summary only</button></div><div class="small muted" id="shareout"></div></div>`;
+function wireShare() {
+  const a = $('#shareall'), b = $('#sharesum');
+  if (a) a.onclick = () => shareData(true, $('#shareout'));
+  if (b) b.onclick = () => shareData(false, $('#shareout'));
 }
 
 // ---------------------------------------------------------------- TEST: what reached the (emulated) Drive and Sheet
@@ -1254,6 +1399,7 @@ async function screenDemo() {
   const boxCols = ['Box ID', 'AWB', 'Box', 'Boxes', 'Status', 'Order no.', 'Slip check', 'Pre-booking box', 'Flags'];
   view(`<div class="bar"><a href="#/sup">&#8249;</a><h1>TEST: Drive and Sheet</h1></div><div class="adm">
     <div class="card warn">Test copies on this device only. Your real Google Drive and Sheets are not touched.</div>
+    ${shareCard((await db.all('photos')).filter((p) => p.blob).length)}
     <h2>Book a measured parcel (stands in for the operator)</h2>
     <p class="small">Type the AWB of the courier label for a Pre-booking row, as the operator will paste it. Then photograph the parcel with the label stuck next to the slip: the app picks PROOF.</p>
     ${pre.filter((r) => !r['AWB'] && !r['Cancelled']).map((r) => `<div class="card small"><b>${esc(r['Box ID'])}</b> · box ${esc(r['Box'])} · order (phone) ${esc(r['Order no. (phone)'] || '-')}
@@ -1268,6 +1414,7 @@ async function screenDemo() {
   </div>`);
   app.cleanup = () => urls.forEach((u) => URL.revokeObjectURL(u));
   for (const img of document.querySelectorAll('.thumbs img')) img.onclick = () => modal(`<img src="${img.dataset.full}" alt="" style="width:100%;border-radius:10px"><div class="row"><button id="x">Close</button></div>`, (m, close) => { $('#x', m).onclick = () => close(); });
+  wireShare();
   const book = async (boxId, own) => {
     const r = pre.find((x) => x['Box ID'] === boxId);
     const v = await askText(own ? "The box's own AWB" : 'The AWB booked for this parcel', 'As printed on the courier label (the demo camera prints the demo AWB).', { placeholder: app.settings.demoScene.awb || DEMO_AWB, check: (x) => (AWB_OK.test(normCode(x)) ? '' : '6-20 letters or digits') });

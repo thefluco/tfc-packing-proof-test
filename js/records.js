@@ -37,7 +37,7 @@ export function upgradeBox(b) {
   if (!b) return b;
   b.photos = b.photos || {};
   for (const k of [...PROOF_KINDS, ...MEASURE_KINDS]) b.photos[k] = b.photos[k] || [];
-  b.fails = b.fails || {}; b.flags = b.flags || [];
+  b.fails = b.fails || {}; b.flags = b.flags || []; b.redo = b.redo || [];
   return b;
 }
 export function updateBox(id, mutate) {
@@ -126,34 +126,64 @@ export function listFor(s, b, kind) { return kind === 'boxes' ? s.boxes_photo : 
 export function finalPhoto(ids, byId) { return ids && ids.length ? byId[ids[ids.length - 1]] || null : null; }
 export function nextNn(list, byId) { return list.reduce((m, id) => Math.max(m, (byId[id] && byId[id].nn) || 0), 0) + 1; }
 
-export function boxDone(s, b) { return kindsOf(s).every((k) => b.photos[k] && b.photos[k].length > 0); }
-export function photosTaken(s, b) { return kindsOf(s).filter((k) => b.photos[k] && b.photos[k].length > 0).length; }
+// A step still to do: no photo yet, or marked to be taken again ("redo": the new photo becomes the final one, the
+// old ones stay in Drive and the Sheet as retakes).
+export function needs(b, k) { return !(b.photos[k] && b.photos[k].length) || (b.redo || []).includes(k); }
+export function boxDone(s, b) { return kindsOf(s).every((k) => !needs(b, k)); }
+export function photosTaken(s, b) { return kindsOf(s).filter((k) => !needs(b, k)).length; }
 export function needsBoxesPhoto(s, boxes) { return stageOf(s) === 'proof' && boxes.length > 1; }
+const boxesPhotoDue = (s, boxes) => needsBoxesPhoto(s, boxes) && (!s.boxes_photo.length || !!s.boxes_redo);
 export function recordDone(s, boxes) {
-  return boxes.length > 0 && boxes.every((b) => boxDone(s, b)) && (!needsBoxesPhoto(s, boxes) || s.boxes_photo.length > 0);
+  return boxes.length > 0 && boxes.every((b) => boxDone(s, b)) && !boxesPhotoDue(s, boxes);
 }
 export const isOpen = (s) => !s.cancelled_at && !s.completed_at && !s.kept_aside;
 
 // What comes next: {screen: 'step', box, kind} | {screen: 'boxdone', box} (MEASURE) | {screen: 'done'} |
-// {screen: 'aside'} | {screen: 'cancelled'}
+// {screen: 'aside'} | {screen: 'cancelled'}. Steps marked to redo come first, box by box, in the step order.
 export function nextStep(s, boxes) {
   if (s.cancelled_at) return { screen: 'cancelled' };
   if (s.kept_aside) return { screen: 'aside' };
+  const kinds = kindsOf(s);
+  for (const b of boxes) {
+    const k = kinds.find((x) => (b.redo || []).includes(x));
+    if (k) return { screen: 'step', box: b, kind: k };
+  }
   if (stageOf(s) === 'measure') {
     const b = boxes[boxes.length - 1];
-    const k = MEASURE_KINDS.find((x) => !b.photos[x].length);
+    const k = MEASURE_KINDS.find((x) => needs(b, x));
     return k ? { screen: 'step', box: b, kind: k } : s.completed_at ? { screen: 'done' } : { screen: 'boxdone', box: b };
   }
   // PROOF: the box whose label is being taken first, then its photos; the label of the next box after that
   for (const b of boxes) {
     if (!b.photos.label.length) continue;
-    const k = PROOF_KINDS.find((x) => !b.photos[x].length);
+    const k = PROOF_KINDS.find((x) => needs(b, x));
     if (k) return { screen: 'step', box: b, kind: k };
   }
   const nolabel = boxes.find((b) => !b.photos.label.length);
   if (nolabel) return { screen: 'step', box: nolabel, kind: 'label' };
-  if (needsBoxesPhoto(s, boxes) && !s.boxes_photo.length) return { screen: 'step', box: null, kind: 'boxes' };
+  if (boxesPhotoDue(s, boxes)) return { screen: 'step', box: null, kind: 'boxes' };
   return { screen: 'done' };
+}
+
+// "Redo": take some steps again - one photo, a whole box, or every box (and the all-boxes photo). The record opens
+// again; a redone label runs the label-slip check again. items: [{box, kinds}]. Every redo is noted on the box.
+export async function markRedo(s, items, { boxesPhoto = false } = {}) {
+  const at = isoLocal().slice(11, 16), all = kindsOf(s);
+  for (const it of items) {
+    if (!it.kinds.length) continue;
+    await updateBox(it.box.id, (x) => {
+      x.redo = all.filter((k) => (x.redo || []).includes(k) || it.kinds.includes(k));
+      x.completed_at = null;
+      for (const k of it.kinds) x.fails[k] = 0;
+      if (it.kinds.includes('label')) { x.slip_check = ''; x.check_fails = 0; x.check_seen = ''; x.check_why = ''; }
+      if (it.kinds.includes('slip')) { x.slip_read = ''; }
+      const what = it.kinds.length === all.length ? 'the whole box' : it.kinds.join(', ');
+      x.flags.push(`redo ${what} (${at})`);
+    });
+  }
+  if (boxesPhoto) { s.boxes_redo = true; flagRecord(s, `redo the all-boxes photo (${at})`); }
+  s.completed_at = null;
+  await db.put('shipments', s);
 }
 
 // The Sheet status of a box.
@@ -202,11 +232,13 @@ export async function addPhoto(s, b, kind, data, byId) {
     const fresh = await updateBox(b.id, (x) => {
       const l = listFor(s, x, kind);
       if (!l.includes(p.id)) l.push(p.id);
+      x.redo = (x.redo || []).filter((k) => k !== kind);   // a redone step is done again
       if (boxDone(s, x) && !x.completed_at) x.completed_at = isoLocal();
     });
     Object.assign(b, fresh);
   } else {
     list.push(p.id);
+    s.boxes_redo = false;
     await db.putMany([['photos', p], ['shipments', s]]);
   }
   if (p.name) await db.enqueue({ type: 'photo', photo_id: p.id });

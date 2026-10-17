@@ -64,11 +64,24 @@ export const S = {
   step_slip: ['स्लिप', 'slip'], step_label: ['लेबल', 'label'], step_scale: ['वज़न', 'weight'], step_length: ['लंबाई', 'length'],
   step_breadth: ['चौड़ाई', 'breadth'], step_height: ['ऊँचाई', 'height'], step_boxes: ['सब बॉक्स', 'all boxes'],
 
+  // redo: one photo, a box, every box (owner, 17 Oct)
+  redo_btn: ['फिर से करें', 'Redo a photo or a box'],                                            // NEW
+  redo_title: ['क्या फिर से करना है?', 'What should be taken again?'],                           // NEW
+  redo_tap: ['जो फोटो फिर से लेनी है, उस पर टैप करें', 'Tap each photo to take again'],          // NEW
+  restart_box: ['पूरा बॉक्स {n} फिर से', 'Restart box {n}'],                                      // NEW
+  restart_all: ['सभी बॉक्स फिर से', 'Restart all boxes'],                                        // NEW
+  redo_go: ['चुनी हुई फोटो फिर से लें', 'Take the chosen photos again'],                         // NEW
+  old_kept: ['पुरानी फोटो भी रखी रहेंगी', 'The old photos are kept too'],                         // NEW
+  redo_mark: ['फिर से', 'again'],                                                                 // NEW
+  back: ['वापस', 'Back'],                                                                         // NEW
+  sup_redo: ['पूरे हुए पार्सल की फोटो फिर से', 'Redo photos of a finished parcel'],              // NEW
+
   // after a photo
   checking: ['जाँच हो रही है…', 'Checking…'],                                                    // NEW
   no_photo: ['कैमरे से फोटो नहीं आई, फिर से लें', 'No photo came back from the camera: take it again'],   // NEW
   saved: ['फोटो सेव हो गई', 'Photo saved'],                                                     // NEW
   next_step: ['आगे: {step}', 'Next: {step}'],
+  next: ['आगे', 'Next'],                                                                          // NEW
   short_beep: ['छोटी बीप', 'short beep'],
 
   // S4 order number read (MEASURE)
