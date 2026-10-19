@@ -83,7 +83,8 @@ const mergeLevels = (l = {}) => ({ ...DEFAULT_LEVELS, ...l, sharp: { ...DEFAULT_
 async function loadSettings() {
   const s = await db.getKV('settings', {});
   const out = { ...DEFAULTS, ...s, levels: mergeLevels(s.levels) };
-  if (!out.scriptUrl || (out.scriptUrl === HARNESS_URL && DEFAULT_SCRIPT_URL && !TEST_SITE)) out.scriptUrl = DEFAULT_SCRIPT_URL;
+  // A setup left by the TEST site (stand-in address and key) stays as it is here: restoreReal() must still see it.
+  if (!out.scriptUrl) out.scriptUrl = DEFAULT_SCRIPT_URL;
   return out;
 }
 async function saveSettings(patch) {
@@ -316,7 +317,7 @@ async function openRecords() {
 async function screenHome() {
   const st = app.settings, recs = await openRecords();
   const open = recs.filter((x) => R.isOpen(x.s) && x.nx.screen === 'step'), aside = recs.filter((x) => x.s.kept_aside);
-  const pending = app.q.pending || 0, w = pending ? t('waiting', { n: pending }) : t('all_sent');
+  const { w, bad: stuck } = waitWords(app.q);
   const lockW = st.lock ? t('lock_on', { step: t(st.lock === 'measure' ? 'measure_chip' : 'proof_chip').hi }) : null;
   view(`<div class="scr">
     <header class="home-head"><div><div class="t">${hh('app_name')}${st.test ? `<span class="testtag">${hh('test_mode')}</span>` : ''}</div><div class="s" lang="en">${ee('app_name')} · ${esc(st.station)}</div></div>
@@ -333,7 +334,7 @@ async function screenHome() {
       ${aside.length ? `<button class="cardbtn amber" id="asidecard"><span>${I.release(24)}</span><span><span style="display:block;font-size:17px;font-weight:600">${hh('kept_aside_n', { n: aside.length })}</span><span lang="en" style="font-size:14px">${ee('kept_aside_n', { n: aside.length })}</span></span></button>` : ''}
     </main>
     <footer>${bigBtn('take', 'take_photo', 'neutral', I.camera(48))}
-      <div class="waitline">${I.cloud(20)}<span id="waitline">${esc(w.hi)} · <span lang="en">${esc(w.en)}</span></span></div></footer></div>`);
+      <div class="waitline">${I.cloud(20)}<span id="waitline"${stuck ? ' class="bad"' : ''}>${esc(w.hi)} · <span lang="en">${esc(w.en)}</span></span></div></footer></div>`);
   $('#take').style.minHeight = '132px';
   $('#take').onclick = takeFirst;
   $('#sup').onclick = () => go('#/sup');
@@ -1445,10 +1446,15 @@ async function screenDemo() {
 }
 
 // ---------------------------------------------------------------- uploads, housekeeping, start
+// The line under the home button: what is waiting, and why it is stuck when the backend refuses the key.
+function waitWords(q) {
+  const n = q.pending || 0, stuck = n && (q.pausedCode === 'bad_key' || q.pausedCode === 'no_key');
+  return { w: stuck ? t(q.pausedCode === 'bad_key' ? 'up_bad_key' : 'up_no_key', { n }) : n ? t('waiting', { n }) : t('all_sent'), bad: !!stuck };
+}
 function onQ(state) {
   app.q = state;
   const el = $('#waitline');
-  if (el) { const w = state.pending ? t('waiting', { n: state.pending }) : t('all_sent'); el.innerHTML = `${esc(w.hi)} · <span lang="en">${esc(w.en)}</span>`; }
+  if (el) { const { w, bad } = waitWords(state); el.innerHTML = `${esc(w.hi)} · <span lang="en">${esc(w.en)}</span>`; el.classList.toggle('bad', bad); }
 }
 
 async function prune() {
@@ -1480,12 +1486,22 @@ async function holdReal() {
   for (const i of q) await db.del('queue', i.seq);
   await saveSettings({ setupDone: false });
 }
+// A setup on the stand-in address is the TEST site's: its key means nothing to the real backend. With the real setup
+// held aside it comes back (a PIN set on the TEST site stays if the real setup had none); without one, the phone opens
+// on Settings for the station key instead of sending photos with the stand-in's key.
 async function restoreReal() {
-  const held = await db.getKV('real-held', null);
-  if (!held) return;
-  for (const i of held.queue || []) { const { seq, ...item } = i; await db.put('queue', item); }
-  if (!app.settings.scriptUrl || app.settings.scriptUrl === HARNESS_URL) await saveSettings({ ...held.settings, setupDone: true });
-  await db.del('kv', 'real-held');
+  const held = await db.getKV('real-held', null), st = app.settings;
+  const leftover = !st.scriptUrl || st.scriptUrl === HARNESS_URL;
+  if (held) {
+    for (const i of held.queue || []) { const { seq, ...item } = i; await db.put('queue', item); }
+    if (leftover) {
+      const h = held.settings || {}, pin = h.pinHash ? { pinHash: h.pinHash, pinSalt: h.pinSalt } : { pinHash: st.pinHash || '', pinSalt: st.pinSalt || '' };
+      await saveSettings({ ...h, ...pin, scriptUrl: h.scriptUrl || DEFAULT_SCRIPT_URL, setupDone: !!(h.scriptUrl && h.key) });
+    }
+    await db.del('kv', 'real-held');
+  } else if (leftover) {
+    await saveSettings({ scriptUrl: DEFAULT_SCRIPT_URL, key: '', station: st.station === 'Test station' ? DEFAULTS.station : st.station, setupDone: false });
+  }
 }
 
 function registerSW() {

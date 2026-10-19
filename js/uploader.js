@@ -42,7 +42,7 @@ export class Uploader {
     this.getSettings = getSettings;
     this.onState = onState || (() => {});
     this.busy = false; this.again = false;
-    this.state = { pending: 0, sending: '', error: '', paused: '', lastOk: null };
+    this.state = { pending: 0, sending: '', error: '', paused: '', pausedCode: '', lastOk: null };
   }
 
   report() { this.onState({ ...this.state }); }
@@ -61,12 +61,13 @@ export class Uploader {
 
   async retryNow() {
     for (const i of await db.all('queue')) if (i.next) await db.put('queue', { ...i, next: 0 });
-    this.state.paused = '';
+    this.state.paused = ''; this.state.pausedCode = '';
     return this.kick();
   }
 
   async drain() {
     const st = await this.getSettings();
+    this.state.pausedCode = !st.scriptUrl ? 'no_url' : !st.key ? 'no_key' : '';
     this.state.paused = !st.scriptUrl ? 'No backend URL yet (Settings)' : !st.key ? 'No station key yet (Settings)' : '';
     for (;;) {
       const items = (await db.all('queue')).sort((a, b) => a.seq - b.seq);
@@ -98,7 +99,7 @@ export class Uploader {
 
   async handleReply(item, r) {
     if (r && r.ok) { await db.del('queue', item.seq); this.state.error = ''; this.state.lastOk = isoLocal(); return 'done'; }
-    if (r && r.code === 'bad_key') { this.state.paused = 'Station key refused - fix it in Settings'; return 'stop'; }
+    if (r && r.code === 'bad_key') { this.state.paused = 'Station key refused - fix it in Settings'; this.state.pausedCode = 'bad_key'; return 'stop'; }
     const why = r && r.code === 'network' ? `Cannot reach the backend (${r.error})` : `Backend said: ${(r && (r.error || r.code)) || 'no reply'}`;
     await this.fail(item, why);
     return 'retry';

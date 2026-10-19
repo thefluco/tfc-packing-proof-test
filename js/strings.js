@@ -11,6 +11,8 @@ export const S = {
   take_photo: ['फोटो लें', 'Take photo'],
   waiting: ['{n} फोटो भेजना बाकी, अपने आप चली जाएँगी', '{n} photos waiting, they send by themselves'],
   all_sent: ['सब फोटो भेज दी गईं', 'All photos sent'],                                         // NEW
+  up_bad_key: ['{n} फोटो रुकी हैं: स्टेशन की गलत है। सुपरवाइज़र सेटिंग्स में सही की डालें', '{n} photos held: the station key was refused. Supervisor: enter the right key in Settings'],   // NEW
+  up_no_key: ['{n} फोटो रुकी हैं: स्टेशन की नहीं डाली। सुपरवाइज़र सेटिंग्स में डालें', '{n} photos held: no station key yet. Supervisor: enter it in Settings'],                          // NEW
   unfinished: ['अधूरा: {step}', 'Unfinished: {step}'],                                          // NEW
   kept_aside_n: ['{n} पार्सल अलग रखे हैं, सुपरवाइज़र देखेंगे', '{n} parcels kept aside: the supervisor will check'],   // NEW
   lock_on: ['यह फोन सिर्फ़ {step} के लिए', 'This phone: {step} only'],                           // NEW
