@@ -79,6 +79,7 @@ h1.ttl { margin: 0; font-size: 30px; line-height: 1.15; font-weight: 700; }
 .boxpick button.on { background: var(--proof); color: #fff; } .boxpick button:disabled { opacity: .4; }
 
 .waitline { display: flex; align-items: center; gap: 10px; font-size: 15px; color: var(--muted); }
+.waitline .bad { color: var(--bad); font-weight: 600; }
 .cards { display: flex; flex-direction: column; gap: 8px; }
 .cardbtn { display: flex; align-items: center; gap: 12px; width: 100%; border: 1px solid var(--line); border-radius: 14px; background: #fff; color: var(--ink); text-align: left; padding: 10px 14px; min-height: 60px; }
 .cardbtn.amber { background: var(--amber-bg); border-color: var(--amber); color: var(--amber-ink); }
