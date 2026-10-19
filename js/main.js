@@ -13,7 +13,7 @@
 import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, READ_MAX_BYTES, MIN_QUALITY, MEASURE_KINDS, PROOF_KINDS, DEMO_AWB, DEMO_ORDER, TEST_SITE, TEST_BACKEND } from './config.js';
 import * as db from './store.js';
 import * as R from './records.js';
-import { readCodes, normCode, normOrder, AWB_OK, isoLocal, istDay, uuid, checksLine, pickStage, labelZone, slipCheck } from './logic.js';
+import { readCodes, normCode, normOrder, AWB_OK, isoLocal, istDay, uuid, checksLine, pickStage, labelZone, slipCheck, slipOrderOf } from './logic.js';
 import { judge } from './quality.js';
 import * as barcode from './barcode.js';
 import * as ocr from './ocr.js';
@@ -153,7 +153,7 @@ function demoFor(kind, s, b) {
   const boxes = s ? s.boxes.length : 1;
   return {
     kind, paper: d.paper || 'slip', order: proof && d.wrong ? 'TFC-001599992' : order, labelOrder: order, code, code2: code, label: proof,
-    blur: d.blur ? 8 : 0, boxText: boxes > 1 && b ? `Box ${b.n}/${boxes}` : '', smudge: !!d.smudge,
+    blur: d.blur ? 8 : 0, boxText: boxes > 1 && b ? `Box ${b.n}/${boxes}` : '', smudge: !!d.smudge, order2: d.order2 || '',
   };
 }
 
@@ -171,12 +171,15 @@ async function checkPhoto(shot, kind, { probe = false } = {}) {
   const sj = judge(c.metrics, kind, lv, false);
   const reasons = sj.reasons.map((r) => (r.startsWith('blurred') ? 'blurry' : r === 'too dark' ? 'dark' : r === 'too bright' ? 'glare' : 'blurry'));
   if (shot.agoMin > lv.oldPhotoMin) reasons.push('old');
-  let found = [];
+  let found = [], how = '';
   if (probe && c.probe) {
-    try { found = await barcode.detect(c.probe, c.probe.width, c.probe.height); } catch { found = []; }
+    // a courier barcode (AWB-like) is what the stage pick and the label check need: look harder when none is seen
+    ({ found, how } = await barcode.detectHard(c.probe, (f) => readCodes(f).cands.length > 0));
   }
   if (c.probe && c.probe.close) c.probe.close();
-  return { job, c, sj, reasons: [...new Set(reasons)], found, rc: readCodes(found), zone: labelZone(found) };
+  const rc = readCodes(found);
+  const codesLine = !probe ? '' : rc.cands.length ? `courier barcode ${rc.cands.join(', ')} read (${how})` : 'no courier barcode read';
+  return { job, c, sj, reasons: [...new Set(reasons)], found, rc, zone: labelZone(found), codesLine };
 }
 
 function checksOf(shot, chk, res, extra = {}) {
@@ -372,15 +375,16 @@ async function processFirst(shot, forced) {
       if (!r) { lookupFailed = true; break; }
       if (r.found) { booked = code; lk = r; break; }
     }
-    // 2. the order number on the slip (read on the phone; outside the label when there is one)
+    // 2. the order number on the slip (read on the phone; outside the label when there is one). Two different
+    // numbers read: the next pass looks again, and no number is guessed (the staff pick in MEASURE).
     const expected = chk.rc.orderRef || (lk && lk.order) || '';
-    const outside = (hits) => hits.filter((h) => !(chk.zone && (h.x == null || (chk.zone.axis === 'x' ? h.x >= chk.zone.lo && h.x <= chk.zone.hi : h.y >= chk.zone.lo && h.y <= chk.zone.hi))));
     const o = await ocr.readOrders(shot.blob, {
-      until: (hits) => (booked && expected ? slipCheck(expected, hits, chk.zone).result === 'match' : outside(hits).length > 0),
+      until: (hits) => (booked && expected ? slipCheck(expected, hits, chk.zone).result === 'match' : slipOrderOf(hits, chk.zone).cands.length === 1),
     });
-    const slipHits = o.ok ? outside(o.hits) : [];
-    const first = { shot, chk, lk, booked, ocr: o, slipOrder: slipHits.length ? slipHits[0].order : '', forced: !!forced && chk.reasons.length > 0, tries };
-    const pick = pickStage({ codes: chk.rc.cands, booked, lookupFailed, slipOrder: first.slipOrder, lock: st.lock });
+    const so = o.ok ? slipOrderOf(o.hits, chk.zone) : { order: '', cands: [] };
+    const first = { shot, chk, lk, booked, ocr: o, slipOrder: so.order, slipCands: so.cands, forced: !!forced && chk.reasons.length > 0, tries };
+    // a slip number read counts as a slip, even when the phone cannot tell which of two numbers it is
+    const pick = pickStage({ codes: chk.rc.cands, booked, lookupFailed, slipOrder: so.order || so.cands[0] || '', lock: st.lock });
     app.last.pick = pick;
     done(); app.busy = false;
     if (pick.stage === 'booked') { chk.job.cancel(); return showAlreadyBooked(); }
@@ -422,8 +426,30 @@ function chooseAwb(cands) {
   (m, close) => { for (const x of m.querySelectorAll('[data-c]')) x.onclick = () => close(x.dataset.c); $('#none', m).onclick = () => close(''); });
 }
 
+// The phone read two (or more) different order numbers on the slip: the staff look at the slip and tap the one
+// printed there. The digits that differ are shown bold. -> the number, or '' (none of these / not sure).
+function chooseOrder(cands) {
+  const diff = (o) => [...o].map((ch, i) => (cands.some((c) => c[i] !== ch) ? `<b class="dg">${esc(ch)}</b>` : esc(ch))).join('');
+  return modal(`<h3>${hh('pick_order')}</h3><p class="small" lang="en" style="margin-top:-4px">${ee('pick_order')}</p>
+    <p class="small muted">${hh('pick_order_hint')} · <span lang="en">${ee('pick_order_hint')}</span></p>
+    ${cands.map((c) => `<button class="wide pickord" data-o="${esc(c)}"><span class="ord mono">${diff(c)}</span></button>`).join('')}
+    <button class="wide" id="pnone" style="margin-top:14px">${hh('pick_none')} · <span lang="en">${ee('pick_none')}</span></button>`,
+  (m, close) => {
+    m.onclick = null;   // a tap beside the sheet must not count as an answer
+    for (const x of m.querySelectorAll('[data-o]')) x.onclick = () => close(x.dataset.o);
+    $('#pnone', m).onclick = () => close('');
+  });
+}
+const pickedNote = (p) => (p.order ? `order no. picked by the staff: the phone read ${p.cands.join(' and ')}` : `the phone read ${p.cands.join(' and ')}; the staff picked none`);
+
 // ---------------------------------------------------------------- MEASURE
 async function startMeasure(first, source) {
+  // two different order numbers read: the staff say which one is on the slip (or none: flagged, slip taken again)
+  let picked = null;
+  if (!first.slipOrder && first.slipCands && first.slipCands.length > 1) {
+    picked = { cands: first.slipCands, order: await chooseOrder(first.slipCands) };
+    first.slipOrder = picked.order;
+  }
   app.busy = true;
   const done = busy('checking');
   try {
@@ -436,8 +462,9 @@ async function startMeasure(first, source) {
     }
     await finishOldMeasures();
     const { s, b } = await R.createMeasure(app.settings, { stage_source: source });
-    await savePhoto(s, b, 'slip', first.shot, first.chk, { tries: first.tries, ocr: ocrLine(first.ocr) });
+    await savePhoto(s, b, 'slip', first.shot, first.chk, { tries: first.tries, ocr: ocrLine(first.ocr), barcode: first.chk.codesLine });
     if (first.slipOrder) await keepHint(s, b, first.slipOrder);   // kept even if the parcel is kept aside next
+    if (picked) await flagBox(b, pickedNote(picked));
     if (first.forced) await flagBox(b, 'first photo used after 2 failed tries');
     if (source === 'asked') R.flagRecord(s, 'stage chosen by staff (the photo showed no order number or label)');
     if (dup) R.flagRecord(s, `order ${first.slipOrder} was already measured at ${String(dup.taken_at).slice(11, 16)} (record ${dup.record})`);
@@ -901,7 +928,7 @@ async function screenStep(sid, bid, kind) {
 async function processStep(sid, bid, kind, shot, forced) {
   if (app.busy) return;
   app.busy = true;
-  const done = busy('checking');
+  let done = busy('checking');
   try {
     const d = await R.load(sid);
     const s = d.s, stage = R.stageOf(s), b = bid ? d.boxes.find((x) => x.id === bid) : null;
@@ -917,14 +944,24 @@ async function processStep(sid, bid, kind, shot, forced) {
     }
     const tries = fails + 1;
     if (kind === 'slip') {
-      const o = await ocr.readOrders(shot.blob, {});
+      const o = await ocr.readOrders(shot.blob, { until: (hits) => slipOrderOf(hits, null).cands.length === 1 });
       await savePhoto(s, b, 'slip', shot, chk, { tries, ocr: ocrLine(o) });
       if (forced && chk.reasons.length) await flagBox(b, 'slip photo used after 2 failed tries');
       await R.updateBox(b.id, (x) => { x.fails.slip = 0; });
+      // one number read: that one; two different ones: the staff pick (never a guess)
+      const so = o.ok ? slipOrderOf(o.hits, null) : { order: '', cands: [] };
+      let order = so.order;
+      if (!order && so.cands.length > 1) {
+        done();
+        const picked = { cands: so.cands, order: await chooseOrder(so.cands) };
+        done = busy('checking');
+        order = picked.order;
+        await flagBox(b, pickedNote(picked));
+      }
       // box 1's first order number read: the already-booked / already-measured checks
-      if (b.n === 1 && o.ok && o.orders.length && !s.order_hint) {
-        const r = await lookup({ by: 'order', order: o.orders[0], record: s.id });
-        if (r && (r.booked || r.measured.length)) await keepHint(s, b, o.orders[0]);
+      if (b.n === 1 && order && !s.order_hint) {
+        const r = await lookup({ by: 'order', order, record: s.id });
+        if (r && (r.booked || r.measured.length)) await keepHint(s, b, order);
         if (r && r.booked) {
           await R.cancelRecord(s, 'order already booked: needs PROOF, not MEASURE');
           await rowsOf(s);
@@ -932,16 +969,16 @@ async function processStep(sid, bid, kind, shot, forced) {
           return showAlreadyBooked();
         }
         if (r && r.measured.length) {
-          R.flagRecord(s, `order ${o.orders[0]} was already measured at ${String(r.measured[0].taken_at).slice(11, 16)} (record ${r.measured[0].record})`);
+          R.flagRecord(s, `order ${order} was already measured at ${String(r.measured[0].taken_at).slice(11, 16)} (record ${r.measured[0].record})`);
           await R.saveRecord(s);
           done(); app.busy = false;
           const fresh = await R.load(sid);
-          return showAlreadyMeasured(fresh.s, fresh.boxes.find((x) => x.id === b.id), o.orders[0], r.measured[0]);
+          return showAlreadyMeasured(fresh.s, fresh.boxes.find((x) => x.id === b.id), order, r.measured[0]);
         }
       }
       done(); app.busy = false;
       const fresh = await R.load(sid);
-      return afterSlip(fresh.s, fresh.boxes.find((x) => x.id === b.id), o, o.ok ? o.orders[0] || '' : '');
+      return afterSlip(fresh.s, fresh.boxes.find((x) => x.id === b.id), o, order);
     }
     if (kind === 'label') {
       const expected = s.label_order || s.order_no || chk.rc.orderRef || '';
@@ -1557,7 +1594,7 @@ async function boot() {
   registerSW();
   await render();
   app.uploader.kick();
-  if (navigator.onLine && !qs.has('noocr')) setTimeout(() => ocr.warm(), 1500);
+  if (navigator.onLine && !qs.has('noocr')) setTimeout(() => { ocr.warm(); barcode.warmLibrary(); }, 1500);
 }
 
 boot();

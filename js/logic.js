@@ -102,13 +102,29 @@ export function labelZone(barcodes) {
     : { axis: 'y', lo: y0 - 0.2 * (y1 - y0), hi: y1 + 0.2 * (y1 - y0) };
 }
 
+// The reader's hits outside the label's band (all of them when no label was located). A hit with no known place
+// counts as the label's when there is a label.
+export function outsideLabel(hits, zone) {
+  const inLabel = (h) => !!zone && (h.x == null || (zone.axis === 'x' ? h.x >= zone.lo && h.x <= zone.hi : h.y >= zone.lo && h.y <= zone.hi));
+  return (hits || []).filter((h) => !inLabel(h));
+}
+
+// MEASURE: the slip's order number, read cold. Exactly one number read (outside the label) -> that number. Two or
+// more different ones (a misread digit, another order's paper in the photo) -> no guess: `cands`, most-read first,
+// for the staff to pick from (19 Oct: the phone read ...448 and ...449 off one slip and kept the wrong one).
+export function slipOrderOf(hits, zone) {
+  const n = new Map();
+  for (const h of outsideLabel(hits, zone)) n.set(h.order, (n.get(h.order) || 0) + 1);
+  const cands = [...n.keys()].sort((a, b) => n.get(b) - n.get(a));
+  return { order: cands.length === 1 ? cands[0] : '', cands };
+}
+
 // Verify only: the expected order number must be read outside the label, in a pass that read no other order
 // number there. hits: [{order, x, y, pass}] from the reader (x/y null = place unknown, counted as the label's when
 // the label was located). -> {result: 'match'|'no match', why: ''|'different'|'not found', seen}
 export function slipCheck(expected, hits, zone) {
   const exp = normOrder(expected);
-  const inLabel = (h) => !!zone && (h.x == null || (zone.axis === 'x' ? h.x >= zone.lo && h.x <= zone.hi : h.y >= zone.lo && h.y <= zone.hi));
-  const out = (hits || []).filter((h) => !inLabel(h));
+  const out = outsideLabel(hits, zone);
   for (const p of [...new Set(out.map((h) => h.pass))]) {
     const ph = out.filter((h) => h.pass === p);
     if (ph.some((h) => h.order === exp) && ph.every((h) => h.order === exp)) return { result: 'match', why: '', seen: exp };

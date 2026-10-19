@@ -71,7 +71,7 @@ function noise(ctx, W, H, seed, alpha, n = 900) {
 
 // A made-up packing slip, `w` wide (about 100 x 135 mm). The order number sits at the top right, small as on the
 // owner's sample (about 3 mm) or, with `big`, as the template edit prints it.
-export function drawSlip(ctx, x, y, w, order, big = false) {
+export function drawSlip(ctx, x, y, w, order, big = false, order2 = '') {
   const h = w * 1.35, f = (r, b = '') => `${b} ${Math.round(w * r)}px Arial, Helvetica, sans-serif`;
   ctx.fillStyle = '#fbfbf8'; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = '#bbb'; ctx.lineWidth = Math.max(1, w * 0.002); ctx.strokeRect(x, y, w, h);
@@ -93,6 +93,8 @@ export function drawSlip(ctx, x, y, w, order, big = false) {
   line('Demo cushion (test item)', 0.03, 0.58); right('1', 0.03, 0.58);
   line('Demo roll (test item)', 0.03, 0.63); right('1', 0.03, 0.63);
   hr(0.7, 0.002);
+  // order2: a second order number on the paper (as when the reader misreads a digit: two numbers from one slip)
+  if (order2) line(`Replaces order #${order2}`, 0.036, 0.68, 'bold');
   line('Balance to pay: ________', 0.028, 0.77);
   line('Thank you! (not a real order)', 0.024, 1.2);
   return h;
@@ -128,7 +130,7 @@ function papers(ctx, W, H, sc) {
   const sw = W * (sc.label ? 0.4 : 0.48), sx = sc.label ? W * 0.06 : W * 0.26, sy = H * 0.24;
   ctx.save();
   if (sc.tilt) { ctx.translate(W / 2, H / 2); ctx.rotate((sc.tilt * Math.PI) / 180); ctx.translate(-W / 2, -H / 2); }
-  if (sc.slip !== false) drawSlip(ctx, sx, sy, sw, sc.order, sc.bigOrder);
+  if (sc.slip !== false) drawSlip(ctx, sx, sy, sw, sc.order, sc.bigOrder, sc.order2 || '');
   if (sc.label) {
     const lx = W * 0.5, ly = sy + W * 0.02, lw = W * 0.44;
     drawLabel(ctx, lx, ly, lw, sc.code, sc.labelOrder === undefined ? sc.order : sc.labelOrder, sc.boxText || '');

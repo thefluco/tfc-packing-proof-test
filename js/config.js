@@ -45,7 +45,8 @@ export const OCR = {
 
 // Barcode reading: Chrome's built-in BarcodeDetector, else this MIT library (ZXing in WebAssembly), loaded once.
 export const BARCODE_FALLBACK_URL = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/es/ponyfill.min.js';
-export const BARCODE_FORMATS = ['code_128', 'code_39', 'code_93', 'codabar', 'itf', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'qr_code'];
+// data_matrix / pdf417: courier labels (Delhivery) carry the AWB in a square 2D code too, which survives a far photo
+export const BARCODE_FORMATS = ['code_128', 'code_39', 'code_93', 'codabar', 'itf', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'qr_code', 'data_matrix', 'pdf417'];
 
 export const DEMO_AWB = '99001610201601';     // demo camera only (desktop testing); never a real shipment
 export const DEMO_ORDER = 'TFC-001599991';    // the made-up slip of the demo camera and the tests
