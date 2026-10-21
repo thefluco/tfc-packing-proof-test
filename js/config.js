@@ -1,7 +1,7 @@
 // TFC Packing Proof - settings that are safe to publish.
 // The station key is NOT here and must never be: it is typed once on the phone (supervisor Settings).
 
-export const APP_VERSION = '2.0.0';
+export const APP_VERSION = '2.1.0';
 
 // The Apps Script web-app URL (.../exec). Not a secret: the script refuses anything without the station key.
 // Fill it in before uploading to GitHub Pages, or paste it in Settings on the phone (Settings wins).
