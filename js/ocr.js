@@ -106,9 +106,11 @@ function hitsOf(data, back) {
 }
 
 // Reads a photo (Blob or ImageBitmap) for order numbers, one pass per size in OCR.passes, until `until(hits)` says
-// it has its answer (default: any order number).
-// -> {ok, hits: [{order, x, y, pass}], orders: [unique], ms, long, error}
-export async function readOrders(source, { until = (hits) => hits.length > 0, passes = OCR.passes } = {}) {
+// it has its answer (default: any order number). Since the slip barcode it is the fallback: no new pass starts after
+// `budgetMs`. `sideways` (the label's barcode stands upright in the photo, logic.js sideways): each size is read
+// turned by 90 degrees both ways first, then as it is (21 Oct: a sideways photo read nothing).
+// -> {ok, hits: [{order, x, y, pass}], orders: [unique], ms, long, tilt, cut, error}
+export async function readOrders(source, { until = (hits) => hits.length > 0, passes = OCR.passes, budgetMs = OCR.budgetMs, sideways = false } = {}) {
   const t0 = performance.now();
   let bitmap = null;
   const own = source instanceof Blob;
@@ -116,17 +118,19 @@ export async function readOrders(source, { until = (hits) => hits.length > 0, pa
     const w = await getWorker();
     bitmap = own ? await createImageBitmap(source) : source;
     const sk = grey(bitmap, 1000), tilt = skewOf(sk.g, sk.w, sk.h), turn = Math.abs(tilt) >= 1.5 ? tilt : 0;
+    const plan = passes.flatMap((L) => (sideways ? [[L, 90], [L, -90], [L, turn]] : [[L, turn]]));
     const hits = [];
-    let long = 0;
-    for (const L of passes) {
+    let long = 0, cut = false;
+    for (const [L, tn] of plan) {
+      if (long && performance.now() - t0 > budgetMs) { cut = true; break; }   // the first pass always runs
       long = L;
-      const img = await copyAt(bitmap, L, turn);
+      const img = await copyAt(bitmap, L, tn);
       const { data } = await w.recognize(img.blob, {}, { text: true, blocks: true });
-      for (const x of hitsOf(data, img.back)) hits.push({ ...x, pass: L });
+      for (const x of hitsOf(data, img.back)) hits.push({ ...x, pass: Math.abs(tn) === 90 ? `${L}@${tn}` : L });
       if (until(hits)) break;
     }
     const orders = [...new Set(hits.map((x) => x.order))];
-    return { ok: true, hits, orders, ms: Math.round(performance.now() - t0), long, tilt };
+    return { ok: true, hits, orders, ms: Math.round(performance.now() - t0), long, tilt, cut };
   } catch (e) {
     return { ok: false, hits: [], orders: [], ms: Math.round(performance.now() - t0), error: String((e && e.message) || e) };
   } finally {

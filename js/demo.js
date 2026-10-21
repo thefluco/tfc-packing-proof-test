@@ -41,6 +41,34 @@ export function ean13(digits) {
   return { modules: m + '101', text: d.join('') };
 }
 
+// Code 39, as the Shopify packing slip prints the order number (21 Oct 2026): 9 elements a character (bar, space,
+// ...), w = wide (3 modules), n = narrow; characters are separated by one narrow space; * starts and stops it.
+const C39 = {
+  0: 'nnnwwnwnn', 1: 'wnnwnnnnw', 2: 'nnwwnnnnw', 3: 'wnwwnnnnn', 4: 'nnnwwnnnw', 5: 'wnnwwnnnn', 6: 'nnwwwnnnn', 7: 'nnnwnnwnw',
+  8: 'wnnwnnwnn', 9: 'nnwwnnwnn', A: 'wnnnnwnnw', B: 'nnwnnwnnw', C: 'wnwnnwnnn', D: 'nnnnwwnnw', E: 'wnnnwwnnn', F: 'nnwnwwnnn',
+  G: 'nnnnnwwnw', H: 'wnnnnwwnn', I: 'nnwnnwwnn', J: 'nnnnwwwnn', K: 'wnnnnnnww', L: 'nnwnnnnww', M: 'wnwnnnnwn', N: 'nnnnwnnww',
+  O: 'wnnnwnnwn', P: 'nnwnwnnwn', Q: 'nnnnnnwww', R: 'wnnnnnwwn', S: 'nnwnnnwwn', T: 'nnnnwnwwn', U: 'wwnnnnnnw', V: 'nwwnnnnnw',
+  W: 'wwwnnnnnn', X: 'nwnnwnnnw', Y: 'wwnnwnnnn', Z: 'nwwnwnnnn', '-': 'nwnnnnwnw', '.': 'wwnnnnwnn', ' ': 'nwwnnnwnn', '*': 'nwnnwnwnn',
+};
+// Element widths in modules (bar, space, bar, ...) for `*text*`.
+export function code39(text) {
+  const out = [];
+  [...`*${String(text).toUpperCase()}*`].forEach((ch, i) => {
+    if (!C39[ch]) throw new Error('Code 39 cannot encode ' + ch);
+    if (i) out.push(1);
+    for (const e of C39[ch]) out.push(e === 'w' ? 3 : 1);
+  });
+  return out;
+}
+function drawCode39(ctx, text, x, y, maxW, h) {
+  const widths = code39(text), total = widths.reduce((a, c) => a + c, 0) + 20;   // + quiet zones
+  const m = Math.max(2, Math.floor(maxW / total));
+  ctx.fillStyle = '#fff'; ctx.fillRect(x, y, maxW, h);
+  let cx = Math.round(x + (maxW - (total - 20) * m) / 2);
+  ctx.fillStyle = '#000';
+  widths.forEach((w, i) => { if (i % 2 === 0) ctx.fillRect(cx, y, w * m, h); cx += w * m; });
+}
+
 function drawCode128(ctx, text, x, y, maxW, h) {
   const widths = code128(text);
   const total = [...widths].reduce((a, c) => a + Number(c), 0);
@@ -70,8 +98,9 @@ function noise(ctx, W, H, seed, alpha, n = 900) {
 }
 
 // A made-up packing slip, `w` wide (about 100 x 135 mm). The order number sits at the top right, small as on the
-// owner's sample (about 3 mm) or, with `big`, as the template edit prints it.
-export function drawSlip(ctx, x, y, w, order, big = false, order2 = '') {
+// owner's sample (about 3 mm) or, with `big`, as the template edit prints it. `bar`: the order number as a Code 39
+// barcode under the header (about 80 x 12 mm), as the 21 Oct template prints it.
+export function drawSlip(ctx, x, y, w, order, big = false, order2 = '', bar = false) {
   const h = w * 1.35, f = (r, b = '') => `${b} ${Math.round(w * r)}px Arial, Helvetica, sans-serif`;
   ctx.fillStyle = '#fbfbf8'; ctx.fillRect(x, y, w, h);
   ctx.strokeStyle = '#bbb'; ctx.lineWidth = Math.max(1, w * 0.002); ctx.strokeRect(x, y, w, h);
@@ -83,7 +112,8 @@ export function drawSlip(ctx, x, y, w, order, big = false, order2 = '') {
   ctx.font = f(big ? 0.07 : 0.032, 'bold'); ctx.fillText(`Order #${order}`, x + w * 0.95, y + w * (big ? 0.21 : 0.075));
   ctx.font = f(0.024); ctx.fillText('17 Oct 2026', x + w * 0.95, y + w * 0.11);
   ctx.textAlign = 'left';
-  const dy = big ? 0.12 : 0, Y = (yy) => y + w * (yy + dy), hr = (yy, t) => ctx.fillRect(x + w * 0.05, Y(yy), w * 0.9, Math.max(1, w * t));
+  if (bar && order) drawCode39(ctx, order, x + w * 0.05, y + w * (big ? 0.25 : 0.13), w * 0.9, w * 0.12);
+  const dy = (big ? 0.12 : 0) + (bar ? 0.16 : 0), Y = (yy) => y + w * (yy + dy), hr = (yy, t) => ctx.fillRect(x + w * 0.05, Y(yy), w * 0.9, Math.max(1, w * t));
   const line = (t, r, yy, b) => { ctx.font = f(r, b); ctx.fillText(t, x + w * 0.05, Y(yy)); };
   const right = (t, r, yy, b) => { ctx.font = f(r, b); ctx.textAlign = 'right'; ctx.fillText(t, x + w * 0.95, Y(yy)); ctx.textAlign = 'left'; };
   line('SHIP TO', 0.026, 0.22, 'bold');
@@ -130,7 +160,7 @@ function papers(ctx, W, H, sc) {
   const sw = W * (sc.label ? 0.4 : 0.48), sx = sc.label ? W * 0.06 : W * 0.26, sy = H * 0.24;
   ctx.save();
   if (sc.tilt) { ctx.translate(W / 2, H / 2); ctx.rotate((sc.tilt * Math.PI) / 180); ctx.translate(-W / 2, -H / 2); }
-  if (sc.slip !== false) drawSlip(ctx, sx, sy, sw, sc.order, sc.bigOrder, sc.order2 || '');
+  if (sc.slip !== false) drawSlip(ctx, sx, sy, sw, sc.order, sc.bigOrder, sc.order2 || '', !!sc.slipBar);
   if (sc.label) {
     const lx = W * 0.5, ly = sy + W * 0.02, lw = W * 0.44;
     drawLabel(ctx, lx, ly, lw, sc.code, sc.labelOrder === undefined ? sc.order : sc.labelOrder, sc.boxText || '');
@@ -180,7 +210,7 @@ function boxesScene(ctx, W, H, sc) {
 
 // One pretend photo. scene: {kind: 'first'|'slip'|'label'|'scale'|'length'|'breadth'|'height'|'boxes',
 //   paper: 'slip'|'label'|'product'|'blank' (the first photo), order, labelOrder, code, code2, boxText, bigOrder,
-//   label (show the label in measurement photos), tilt (degrees), blur (px), weight}
+//   label (show the label in measurement photos), tilt (degrees), blur (px), weight, slipBar (the slip's barcode)}
 export function drawScene(ctx, W, H, scene) {
   const sc = { order: '', code: '', ...scene };
   const kind = sc.kind === 'first' ? sc.paper || 'slip' : sc.kind;

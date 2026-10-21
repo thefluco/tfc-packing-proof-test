@@ -13,7 +13,7 @@
 import { APP_VERSION, DEFAULT_SCRIPT_URL, DEFAULT_LEVELS, READ_MAX_BYTES, MIN_QUALITY, MEASURE_KINDS, PROOF_KINDS, DEMO_AWB, DEMO_ORDER, TEST_SITE, TEST_BACKEND } from './config.js';
 import * as db from './store.js';
 import * as R from './records.js';
-import { readCodes, normCode, normOrder, AWB_OK, isoLocal, istDay, uuid, checksLine, pickStage, labelZone, slipCheck, slipOrderOf } from './logic.js';
+import { readCodes, normCode, normOrder, AWB_OK, isoLocal, istDay, uuid, checksLine, pickStage, labelZone, slipCheck, slipOrderOf, slipRead, labelSlipCheck, sideways } from './logic.js';
 import { judge } from './quality.js';
 import * as barcode from './barcode.js';
 import * as ocr from './ocr.js';
@@ -152,8 +152,8 @@ function demoFor(kind, s, b) {
   const code = s && s.awb ? (b && b.box_awb) || s.awb : d.awb || DEMO_AWB;
   const boxes = s ? s.boxes.length : 1;
   return {
-    kind, paper: d.paper || 'slip', order: proof && d.wrong ? 'TFC-001599992' : order, labelOrder: order, code, code2: code, label: proof,
-    blur: d.blur ? 8 : 0, boxText: boxes > 1 && b ? `Box ${b.n}/${boxes}` : '', smudge: !!d.smudge, order2: d.order2 || '',
+    kind, paper: d.paper || 'slip', order: proof && d.wrong ? 'TFC-001599992' : order, labelOrder: d.labelOrder === undefined ? order : d.labelOrder, code, code2: code, label: proof,
+    blur: d.blur ? 8 : 0, boxText: boxes > 1 && b ? `Box ${b.n}/${boxes}` : '', smudge: !!d.smudge, order2: d.order2 || '', slipBar: !!d.slipBar,
   };
 }
 
@@ -173,13 +173,20 @@ async function checkPhoto(shot, kind, { probe = false } = {}) {
   if (shot.agoMin > lv.oldPhotoMin) reasons.push('old');
   let found = [], how = '';
   if (probe && c.probe) {
-    // a courier barcode (AWB-like) is what the stage pick and the label check need: look harder when none is seen
-    ({ found, how } = await barcode.detectHard(c.probe, (f) => readCodes(f).cands.length > 0));
+    // every barcode in the photo: the AWB, the label's own order barcode and the slip's (from 21 Oct). The search
+    // looks harder until it has the slip's barcode (and, on a label photo, a courier barcode too).
+    const want = kind === 'slip' ? (f) => readCodes(f).slipOrders.length > 0
+      : (f) => { const r = readCodes(f); return r.cands.length > 0 && r.slipOrders.length > 0; };
+    ({ found, how } = await barcode.detectHard(c.probe, want));
   }
   if (c.probe && c.probe.close) c.probe.close();
   const rc = readCodes(found);
-  const codesLine = !probe ? '' : rc.cands.length ? `courier barcode ${rc.cands.join(', ')} read (${how})` : 'no courier barcode read';
-  return { job, c, sj, reasons: [...new Set(reasons)], found, rc, zone: labelZone(found), codesLine };
+  const codesLine = !probe ? '' : [
+    kind === 'slip' ? '' : rc.cands.length ? `courier barcode ${rc.cands.join(', ')} read` : 'no courier barcode read',
+    rc.orderRef ? `label order barcode ${rc.orderRef}` : '',
+    rc.slipOrders.length ? `slip barcode ${rc.slipOrders.join(', ')}` : 'no slip barcode',
+  ].filter(Boolean).join(', ') + (how ? ` (${how})` : '');
+  return { job, c, sj, reasons: [...new Set(reasons)], found, rc, zone: labelZone(found), sideways: sideways(found), codesLine };
 }
 
 function checksOf(shot, chk, res, extra = {}) {
@@ -263,13 +270,14 @@ function demoBar() {
     <label>label AWB <input id="dawb" value="${esc(d.awb || DEMO_AWB)}" size="14"></label>
     <label><input type="checkbox" id="dwrong" ${d.wrong ? 'checked' : ''}> wrong slip</label>
     <label><input type="checkbox" id="dblur" ${d.blur ? 'checked' : ''}> blurred</label>
-    <label><input type="checkbox" id="dsmudge" ${d.smudge ? 'checked' : ''}> label barcode unreadable</label></div>`;
+    <label><input type="checkbox" id="dsmudge" ${d.smudge ? 'checked' : ''}> label barcode unreadable</label>
+    <label><input type="checkbox" id="dslipbar" ${d.slipBar ? 'checked' : ''}> slip barcode</label></div>`;
 }
 function wireDemoBar() {
   if (!app.settings.demo) return;
   const upd = () => saveSettings({ demoScene: { paper: $('#dpaper').value, order: normOrder($('#dorder').value) || DEMO_ORDER, awb: normCode($('#dawb').value) || DEMO_AWB,
-    wrong: $('#dwrong').checked, blur: $('#dblur').checked, smudge: $('#dsmudge').checked } });
-  for (const id of ['#dpaper', '#dorder', '#dawb', '#dwrong', '#dblur', '#dsmudge']) $(id).onchange = upd;
+    wrong: $('#dwrong').checked, blur: $('#dblur').checked, smudge: $('#dsmudge').checked, slipBar: $('#dslipbar').checked } });
+  for (const id of ['#dpaper', '#dorder', '#dawb', '#dwrong', '#dblur', '#dsmudge', '#dslipbar']) $(id).onchange = upd;
 }
 
 // ---------------------------------------------------------------- router
@@ -378,10 +386,9 @@ async function processFirst(shot, forced) {
     // 2. the order number on the slip (read on the phone; outside the label when there is one). Two different
     // numbers read: the next pass looks again, and no number is guessed (the staff pick in MEASURE).
     const expected = chk.rc.orderRef || (lk && lk.order) || '';
-    const o = await ocr.readOrders(shot.blob, {
-      until: (hits) => (booked && expected ? slipCheck(expected, hits, chk.zone).result === 'match' : slipOrderOf(hits, chk.zone).cands.length === 1),
-    });
-    const so = o.ok ? slipOrderOf(o.hits, chk.zone) : { order: '', cands: [] };
+    const o = await readSlip(shot.blob, chk,
+      (hits) => (booked && expected ? slipCheck(expected, hits, chk.zone).result === 'match' : slipOrderOf(hits, chk.zone).cands.length === 1));
+    const so = o.ok ? slipRead(o, chk.zone) : { order: '', cands: [] };
     const first = { shot, chk, lk, booked, ocr: o, slipOrder: so.order, slipCands: so.cands, forced: !!forced && chk.reasons.length > 0, tries };
     // a slip number read counts as a slip, even when the phone cannot tell which of two numbers it is
     const pick = pickStage({ codes: chk.rc.cands, booked, lookupFailed, slipOrder: so.order || so.cands[0] || '', lock: st.lock });
@@ -487,7 +494,15 @@ async function finishOldMeasures() {
   }
 }
 
-const ocrLine = (o) => (!o ? '' : !o.ok ? `order no. reader failed: ${o.error}` : `order no. reader ${o.orders.join(', ') || 'found nothing'} (${o.ms} ms${o.tilt ? `, tilt ${o.tilt}°` : ''})`);
+const ocrLine = (o) => (!o ? '' : o.bar ? `order no. from the slip barcode: ${o.bar.join(', ')}` : !o.ok ? `order no. reader failed: ${o.error}`
+  : `order no. reader ${o.orders.join(', ') || 'found nothing'} (${o.ms} ms${o.tilt ? `, tilt ${o.tilt}°` : ''}${o.cut ? ', stopped at the time limit' : ''})`);
+
+// The order number on the slip: its barcode when the photo has one (instant and exact), else the text reader as the
+// fallback (time-limited; turned 90 degrees first when the label stands sideways in the photo).
+function readSlip(blob, chk, until) {
+  if (chk.rc.slipOrders.length) return Promise.resolve({ ok: true, bar: chk.rc.slipOrders, hits: [], orders: chk.rc.slipOrders, ms: 0 });
+  return ocr.readOrders(blob, { until, sideways: chk.sideways });
+}
 
 // The order number the phone read on a slip: a hint for the office ("Order no. (phone)").
 async function keepHint(s, b, order) {
@@ -689,7 +704,7 @@ async function afterLabelPhoto(s, b, shot, chk, o, { first = false, forced = fal
   const label = { code: seen || s.awb || '', codes: rc.all, child: !!seen && seen !== s.awb, typed, at: isoLocal() };
   await R.updateBox(b.id, (x) => { x.label = label; });
   if (rc.orderRef && !s.label_order) { s.label_order = rc.orderRef; await R.saveRecord(s); }
-  const { p } = await savePhoto(s, b, 'label', shot, chk, { tries, barcode: seen ? `barcode ${seen} read` : typed ? 'AWB typed by the supervisor' : 'barcode NOT read', ocr: ocrLine(o) });
+  const { p } = await savePhoto(s, b, 'label', shot, chk, { tries, barcode: (seen ? `barcode ${seen} read` : typed ? 'AWB typed by the supervisor' : 'barcode NOT read') + (rc.orderRef ? `, label order barcode ${rc.orderRef}` : ''), ocr: ocrLine(o) });
   if (forced && chk.reasons.length) await flagBox(b, 'label photo used after 2 failed tries');
   if (!seen && !typed) {
     if (!s.awb) {   // no AWB at all: the photo waits unnamed; the supervisor types the AWB
@@ -709,6 +724,16 @@ async function labelCheck(s, b, o, zone, photo) {
   b = d.boxes.find((x) => x.id === b.id);
   const expected = s.label_order || s.order_no;
   if (s.label_order && s.order_no && s.label_order !== s.order_no) R.flagRecord(s, `the label's order barcode ${s.label_order} differs from the booking ${s.order_no}`);
+  // what the slip says is kept on the box whatever the check finds (the Sheet's "Order no." when nothing else knows it)
+  const sr = o && o.ok ? slipRead(o, zone) : { order: '', cands: [] };
+  if (sr.order || sr.cands.length > 1) {
+    const fresh = await R.updateBox(b.id, (x) => {
+      x.slip_order = sr.order; x.slip_order_via = sr.via;
+      const f = `the slip shows ${sr.cands.join(' and ')} (two different numbers)`;
+      if (!sr.order && !x.flags.includes(f)) x.flags.push(f);
+    });
+    Object.assign(b, fresh);
+  }
   if (!expected || !o || !o.ok) {
     const why = !expected ? 'label-slip check skipped: no order number for this AWB' : 'label-slip check skipped: the reader was not available';
     const fresh = await R.updateBox(b.id, (x) => { x.slip_check = 'skipped'; if (!x.flags.includes(why)) x.flags.push(why); });
@@ -717,8 +742,8 @@ async function labelCheck(s, b, o, zone, photo) {
     return showCheckSkipped(s, b, !expected);
   }
   // the first photo was read cold: read again for this number when the cold read did not settle it
-  let res = slipCheck(expected, o.hits, zone);
-  if (res.result !== 'match' && photo && photo.blob && !o.verified) {
+  let res = labelSlipCheck(expected, o, zone);
+  if (res.result !== 'match' && !o.bar && photo && photo.blob && !o.verified) {
     const done = busy('checking');
     const o2 = await ocr.readOrders(photo.blob, { until: (hits) => slipCheck(expected, hits, zone).result === 'match' });
     done();
@@ -932,7 +957,7 @@ async function processStep(sid, bid, kind, shot, forced) {
   try {
     const d = await R.load(sid);
     const s = d.s, stage = R.stageOf(s), b = bid ? d.boxes.find((x) => x.id === bid) : null;
-    const chk = await checkPhoto(shot, kind, { probe: kind === 'label' });
+    const chk = await checkPhoto(shot, kind, { probe: kind === 'label' || kind === 'slip' });
     const fails = (b ? b.fails[kind] : s.boxes_fails) || 0;
     if (chk.reasons.length && !forced) {
       chk.job.cancel();
@@ -944,12 +969,12 @@ async function processStep(sid, bid, kind, shot, forced) {
     }
     const tries = fails + 1;
     if (kind === 'slip') {
-      const o = await ocr.readOrders(shot.blob, { until: (hits) => slipOrderOf(hits, null).cands.length === 1 });
-      await savePhoto(s, b, 'slip', shot, chk, { tries, ocr: ocrLine(o) });
+      const o = await readSlip(shot.blob, chk, (hits) => slipOrderOf(hits, null).cands.length === 1);
+      await savePhoto(s, b, 'slip', shot, chk, { tries, ocr: ocrLine(o), barcode: chk.codesLine });
       if (forced && chk.reasons.length) await flagBox(b, 'slip photo used after 2 failed tries');
       await R.updateBox(b.id, (x) => { x.fails.slip = 0; });
       // one number read: that one; two different ones: the staff pick (never a guess)
-      const so = o.ok ? slipOrderOf(o.hits, null) : { order: '', cands: [] };
+      const so = o.ok ? slipRead(o, null) : { order: '', cands: [] };
       let order = so.order;
       if (!order && so.cands.length > 1) {
         done();
@@ -982,7 +1007,7 @@ async function processStep(sid, bid, kind, shot, forced) {
     }
     if (kind === 'label') {
       const expected = s.label_order || s.order_no || chk.rc.orderRef || '';
-      const o = await ocr.readOrders(shot.blob, { until: (hits) => (expected ? slipCheck(expected, hits, chk.zone).result === 'match' : hits.length > 0) });
+      const o = await readSlip(shot.blob, chk, (hits) => (expected ? slipCheck(expected, hits, chk.zone).result === 'match' : hits.length > 0));
       done(); app.busy = false;
       return afterLabelPhoto(s, b, shot, chk, { ...o, verified: true }, { forced, tries });
     }

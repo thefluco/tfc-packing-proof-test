@@ -21,6 +21,7 @@ function newBox(s, n, extra = {}) {
     order_hint: '', slip_read: '',          // slip_read: 'read' | 'not read' | 'not available'
     // PROOF
     label: null, pre_box_id: '', box_awb: '', slip_check: '', check_fails: 0, check_seen: '', check_why: '',
+    slip_order: '', slip_order_via: '',    // what the slip next to the label says (its barcode, or the text reader)
     ...extra,
   };
 }
@@ -303,7 +304,9 @@ export function rowSnapshot(s, b, byId) {
   const { photos } = photoSet(s, b, byId, [...PROOF_KINDS, 'boxes']);
   const lab = b.label;
   return {
-    ...common, stage: 'proof', awb: s.awb || '', order_ref: s.label_order || '', order_no: s.order_no || '',
+    // "Order no.": the booking's, else the label's own order barcode, else what the slip says (21 Oct: PROOF rows
+    // with no booking kept no order number at all); the label photo's checks say where each one came from
+    ...common, stage: 'proof', awb: s.awb || '', order_ref: s.label_order || '', order_no: s.order_no || s.label_order || b.slip_order || '',
     slip_check: b.slip_check || '', pre_box_id: b.pre_box_id || '', box_code: lab && lab.child ? lab.code : '',
     readings: {}, book: {}, photos,
     label_codes: lab ? (lab.codes || []).join(' ') + (lab.child ? ' (this box label differs from the AWB)' : '') : '',

@@ -33,10 +33,16 @@ export const AWB_OK = /^[A-Z0-9]{6,20}$/;   // what the backend accepts (typed A
 // Product barcodes: never an AWB, never a reason to switch the stage.
 export const PRODUCT_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e'];
 
-// From a list of decoded barcodes: AWB-like candidates (unique, in order; product barcodes left out) and the order
-// number when a barcode carries one (Shipmozo labels print the order number as a barcode too).
+// The packing slip's own barcode: Code 39 carrying "TFC-" + 9 digits (Shopify template, 21 Oct 2026). A barcode with
+// an order number in any other format is the courier label's own.
+export const SLIP_FORMAT = 'code_39';
+const ORDER_IN_CODE = /TFC-?0*\d{6,}/i;
+export const isSlipCode = (b) => !!b && b.format === SLIP_FORMAT && ORDER_IN_CODE.test(String(b.rawValue ?? ''));
+
+// From a list of decoded barcodes: AWB-like candidates (unique, in order; product barcodes left out), the order
+// number when the label carries one as a barcode (Shipmozo's "Ref ID"), and the slip's own order barcode(s).
 export function readCodes(barcodes) {
-  const all = [], cands = [];
+  const all = [], cands = [], slipOrders = [];
   let orderRef = '';
   for (const b of barcodes || []) {
     const raw = String(b.rawValue ?? b ?? '').trim();
@@ -44,14 +50,23 @@ export function readCodes(barcodes) {
     const v = normCode(raw);
     if (!all.includes(v)) all.push(v);
     if (PRODUCT_FORMATS.includes(b.format)) continue;
+    if (isSlipCode(b)) { const o = normOrder(raw.match(ORDER_IN_CODE)[0]); if (o && !slipOrders.includes(o)) slipOrders.push(o); continue; }
     if (AWB_LIKE.test(v)) { if (!cands.includes(v)) cands.push(v); continue; }
-    const m = raw.match(/TFC-?0*\d{6,}/i);
+    const m = raw.match(ORDER_IN_CODE);
     if (m && !orderRef) orderRef = normOrder(m[0]);
     if (b.format === 'qr_code') {   // a QR may carry the AWB inside a URL or text
       for (const x of raw.matchAll(/(?<!\d)(\d{10,14})(?!\d)/g)) if (!cands.includes(x[1])) cands.push(x[1]);
     }
   }
-  return { all, cands, orderRef };
+  return { all, cands, orderRef, slipOrders };
+}
+
+// A label photographed sideways: its main 1D barcode is taller than wide in the photo (the text reader then needs the
+// copy turned by 90 degrees; barcodes read at any angle).
+export function sideways(barcodes) {
+  const b = (barcodes || []).filter((x) => x && x.box && !['qr_code', 'data_matrix', 'pdf417'].includes(x.format) && !PRODUCT_FORMATS.includes(x.format))
+    .sort((p, q) => Math.max(q.box.w, q.box.h) - Math.max(p.box.w, p.box.h))[0];
+  return !!b && b.box.h > b.box.w * 1.5;
 }
 
 // ---------------------------------------------------------------- order numbers ("TFC-" + 9 digits)
@@ -93,7 +108,7 @@ export function hasOrder(text, expected) {
 // axis, a little wider than the barcodes, right across the photo. The slip goes right next to the label (owner,
 // 17 Oct), so text in the band is the label's and text outside it is the slip's.
 export function labelZone(barcodes) {
-  const boxes = (barcodes || []).filter((b) => b && b.box && !PRODUCT_FORMATS.includes(b.format)).map((b) => b.box);
+  const boxes = (barcodes || []).filter((b) => b && b.box && !PRODUCT_FORMATS.includes(b.format) && !isSlipCode(b)).map((b) => b.box);
   if (!boxes.length) return null;
   const x0 = Math.min(...boxes.map((b) => b.x)), x1 = Math.max(...boxes.map((b) => b.x + b.w));
   const y0 = Math.min(...boxes.map((b) => b.y)), y1 = Math.max(...boxes.map((b) => b.y + b.h));
@@ -132,6 +147,24 @@ export function slipCheck(expected, hits, zone) {
   const other = out.find((h) => h.order !== exp);
   if (other) return { result: 'no match', why: 'different', seen: other.order };
   return { result: 'no match', why: 'not found', seen: '' };
+}
+
+// What the phone read on the slip: from the slip's barcode when there is one (exact; two different slip barcodes in
+// one photo are never guessed between), else from the text reader (slipOrderOf).
+// o = {bar: [orders] | undefined, hits} -> {order, cands, via: 'barcode'|'reader'}
+export function slipRead(o, zone) {
+  if (o && o.bar && o.bar.length) return { order: o.bar.length === 1 ? o.bar[0] : '', cands: [...o.bar], via: 'barcode' };
+  return { ...slipOrderOf((o && o.hits) || [], zone), via: 'reader' };
+}
+
+// The label-slip check: on the slip's barcode when there is one (every slip barcode in the photo must be the expected
+// order), else on the text reader's hits (slipCheck).
+export function labelSlipCheck(expected, o, zone) {
+  if (o && o.bar && o.bar.length) {
+    const exp = normOrder(expected), other = o.bar.find((x) => x !== exp);
+    return other ? { result: 'no match', why: 'different', seen: other } : { result: 'match', why: '', seen: exp };
+  }
+  return slipCheck(expected, (o && o.hits) || [], zone);
 }
 
 // ---------------------------------------------------------------- the stage pick (design note section 2)

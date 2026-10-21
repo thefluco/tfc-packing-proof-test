@@ -41,7 +41,11 @@ export const OCR = {
   base: '../vendor/tesseract/',     // relative to js/
   whitelist: 'TFC-0123456789',
   passes: [1600, 2600],             // long side (px) of the copy that is read, in order
+  // The reader is the fallback since the slip barcode (21 Oct): it stops starting new passes after this long, so a
+  // slip it cannot read never holds the line for long (21 Oct: 7-24 s a photo on the station phone).
+  budgetMs: 8000,
 };
+// The slip's own order barcode (Code 39, from 21 Oct 2026) is logic.js SLIP_FORMAT.
 
 // Barcode reading: Chrome's built-in BarcodeDetector, else this MIT library (ZXing in WebAssembly), loaded once.
 export const BARCODE_FALLBACK_URL = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/es/ponyfill.min.js';
