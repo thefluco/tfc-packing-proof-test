@@ -397,7 +397,8 @@ async function processFirst(shot, forced) {
     if (pick.stage === 'booked') { chk.job.cancel(); return showAlreadyBooked(); }
     if (pick.stage === 'ask') { app.pending = first; return go('#/ask'); }
     if (pick.stage === 'measure') return startMeasure(first, st.lock ? 'locked' : 'found');
-    return startProof(first, st.lock ? 'locked' : 'found', booked);
+    // a phone locked to PROOF: the one courier barcode read is the AWB even when no tab has it (after booking only)
+    return startProof(first, st.lock ? 'locked' : 'found', booked || (chk.rc.cands.length === 1 ? chk.rc.cands[0] : ''));
   } catch (e) {
     done(); app.busy = false;
     toast('Photo failed: ' + e.message, 'bad');
@@ -733,6 +734,15 @@ async function labelCheck(s, b, o, zone, photo) {
       if (!sr.order && !x.flags.includes(f)) x.flags.push(f);
     });
     Object.assign(b, fresh);
+  }
+  // After-booking only (phone locked to PROOF, no Pre-booking tab in use): nothing on the phone knows the AWB's order,
+  // so the office check compares the slip with Shipmozo later (batch-read `proof`). No flag, no extra screen.
+  if (!expected && app.settings.lock === 'proof') {
+    const fresh = await R.updateBox(b.id, (x) => { x.slip_check = 'office'; });
+    Object.assign(b, fresh);
+    await R.saveRecord(s); await rowsOf(s);
+    sound.good();
+    return afterPhoto(s.id);
   }
   if (!expected || !o || !o.ok) {
     const why = !expected ? 'label-slip check skipped: no order number for this AWB' : 'label-slip check skipped: the reader was not available';

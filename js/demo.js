@@ -98,8 +98,8 @@ function noise(ctx, W, H, seed, alpha, n = 900) {
 }
 
 // A made-up packing slip, `w` wide (about 100 x 135 mm). The order number sits at the top right, small as on the
-// owner's sample (about 3 mm) or, with `big`, as the template edit prints it. `bar`: the order number as a Code 39
-// barcode under the header (about 80 x 12 mm), as the 21 Oct template prints it.
+// owner's sample (about 3 mm) or, with `big`, as the template edit prints it. `bar`: the order number as a barcode
+// under the header (about 80 x 12 mm): Code 128 as the 22 Oct template prints it, or 'code39' as the 21 Oct one.
 export function drawSlip(ctx, x, y, w, order, big = false, order2 = '', bar = false) {
   const h = w * 1.35, f = (r, b = '') => `${b} ${Math.round(w * r)}px Arial, Helvetica, sans-serif`;
   ctx.fillStyle = '#fbfbf8'; ctx.fillRect(x, y, w, h);
@@ -112,7 +112,11 @@ export function drawSlip(ctx, x, y, w, order, big = false, order2 = '', bar = fa
   ctx.font = f(big ? 0.07 : 0.032, 'bold'); ctx.fillText(`Order #${order}`, x + w * 0.95, y + w * (big ? 0.21 : 0.075));
   ctx.font = f(0.024); ctx.fillText('17 Oct 2026', x + w * 0.95, y + w * 0.11);
   ctx.textAlign = 'left';
-  if (bar && order) drawCode39(ctx, order, x + w * 0.05, y + w * (big ? 0.25 : 0.13), w * 0.9, w * 0.12);
+  if (bar && order) {
+    const bx = x + w * 0.05, by = y + w * (big ? 0.25 : 0.13);
+    if (bar === 'code39') drawCode39(ctx, order, bx, by, w * 0.9, w * 0.12);
+    else { ctx.fillStyle = '#fff'; ctx.fillRect(bx, by, w * 0.9, w * 0.12); drawCode128(ctx, order, bx + w * 0.05, by, w * 0.8, w * 0.12); }
+  }
   const dy = (big ? 0.12 : 0) + (bar ? 0.16 : 0), Y = (yy) => y + w * (yy + dy), hr = (yy, t) => ctx.fillRect(x + w * 0.05, Y(yy), w * 0.9, Math.max(1, w * t));
   const line = (t, r, yy, b) => { ctx.font = f(r, b); ctx.fillText(t, x + w * 0.05, Y(yy)); };
   const right = (t, r, yy, b) => { ctx.font = f(r, b); ctx.textAlign = 'right'; ctx.fillText(t, x + w * 0.95, Y(yy)); ctx.textAlign = 'left'; };
@@ -160,7 +164,7 @@ function papers(ctx, W, H, sc) {
   const sw = W * (sc.label ? 0.4 : 0.48), sx = sc.label ? W * 0.06 : W * 0.26, sy = H * 0.24;
   ctx.save();
   if (sc.tilt) { ctx.translate(W / 2, H / 2); ctx.rotate((sc.tilt * Math.PI) / 180); ctx.translate(-W / 2, -H / 2); }
-  if (sc.slip !== false) drawSlip(ctx, sx, sy, sw, sc.order, sc.bigOrder, sc.order2 || '', !!sc.slipBar);
+  if (sc.slip !== false) drawSlip(ctx, sx, sy, sw, sc.order, sc.bigOrder, sc.order2 || '', sc.slipBar || false);
   if (sc.label) {
     const lx = W * 0.5, ly = sy + W * 0.02, lw = W * 0.44;
     drawLabel(ctx, lx, ly, lw, sc.code, sc.labelOrder === undefined ? sc.order : sc.labelOrder, sc.boxText || '');

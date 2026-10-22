@@ -90,7 +90,8 @@ export async function createProof(settings, { awb, awbSource, lookup, extra = {}
   const list = lookup && lookup.found && lookup.boxes && lookup.boxes.length ? lookup.boxes : [{ n: 1 }];
   const boxes = list.map((x, i) => newBox(s, i + 1, { pre_box_id: x.box_id || '', box_awb: x.box_awb || '' }));
   s.boxes = boxes.map((b) => b.id);
-  if (!(lookup && lookup.found)) s.flags.push(awb ? 'AWB not in the Pre-booking tab: label-slip check skipped unless the label carries its order number' : 'no AWB yet');
+  // a phone locked to PROOF works after booking only: the Pre-booking tab is not in use, so its absence is no flag
+  if (!(lookup && lookup.found) && !(awb && settings.lock === 'proof')) s.flags.push(awb ? 'AWB not in the Pre-booking tab: label-slip check skipped unless the label carries its order number' : 'no AWB yet');
   await db.putMany([['shipments', s], ...boxes.map((b) => ['boxes', b])]);
   return { s, boxes };
 }
@@ -199,6 +200,7 @@ export function boxStatus(s, b) {
 
 export async function setAwb(s, awb, source) {
   s.awb = awb; s.awb_source = source; s.awb_at = isoLocal();
+  s.flags = (s.flags || []).filter((f) => f !== 'no AWB yet');
   await db.put('shipments', s);
   // photos taken before the AWB was known (a label whose barcode would not read) get their names now
   const boxes = (await db.byIndex('boxes', 'shipment', s.id)).map(upgradeBox);

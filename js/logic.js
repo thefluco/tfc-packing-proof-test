@@ -33,24 +33,36 @@ export const AWB_OK = /^[A-Z0-9]{6,20}$/;   // what the backend accepts (typed A
 // Product barcodes: never an AWB, never a reason to switch the stage.
 export const PRODUCT_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e'];
 
-// The packing slip's own barcode: Code 39 carrying "TFC-" + 9 digits (Shopify template, 21 Oct 2026). A barcode with
-// an order number in any other format is the courier label's own.
-export const SLIP_FORMAT = 'code_39';
+// The packing slip's own barcode carries exactly "TFC-" + 9 digits: Code 128 from 22 Oct 2026 (it has a checksum; on
+// 22 Oct the phone misread the Code 39 one as "TFC7001513431"), Code 39 on the slips printed from 21 Oct. Courier
+// labels carry longer values (AWBs, "62753SMTFC-001513417"), which are the label's own order barcode.
+export const SLIP_FORMATS = ['code_128', 'code_39'];
+const SLIP_VALUE = /^TFC-?\d{9}$/i;
 const ORDER_IN_CODE = /TFC-?0*\d{6,}/i;
-export const isSlipCode = (b) => !!b && b.format === SLIP_FORMAT && ORDER_IN_CODE.test(String(b.rawValue ?? ''));
+export const isSlipCode = (b) => !!b && SLIP_FORMATS.includes(b.format) && SLIP_VALUE.test(String(b.rawValue ?? '').trim());
+
+// The band of the photo the courier label's AWB barcodes take (as labelZone): a slip-shaped barcode inside it is the
+// label's, never the slip's.
+function inBand(zone, box) {
+  if (!zone || !box) return false;
+  const c = zone.axis === 'x' ? box.x + box.w / 2 : box.y + box.h / 2;
+  return c >= zone.lo && c <= zone.hi;
+}
 
 // From a list of decoded barcodes: AWB-like candidates (unique, in order; product barcodes left out), the order
 // number when the label carries one as a barcode (Shipmozo's "Ref ID"), and the slip's own order barcode(s).
 export function readCodes(barcodes) {
   const all = [], cands = [], slipOrders = [];
   let orderRef = '';
-  for (const b of barcodes || []) {
+  const list = barcodes || [];
+  const awbZone = labelZone(list.filter((b) => b && b.box && !isSlipCode(b) && AWB_LIKE.test(normCode(b.rawValue ?? ''))));
+  for (const b of list) {
     const raw = String(b.rawValue ?? b ?? '').trim();
     if (!raw) continue;
     const v = normCode(raw);
     if (!all.includes(v)) all.push(v);
     if (PRODUCT_FORMATS.includes(b.format)) continue;
-    if (isSlipCode(b)) { const o = normOrder(raw.match(ORDER_IN_CODE)[0]); if (o && !slipOrders.includes(o)) slipOrders.push(o); continue; }
+    if (isSlipCode(b) && !inBand(awbZone, b.box)) { const o = normOrder(raw); if (o && !slipOrders.includes(o)) slipOrders.push(o); continue; }
     if (AWB_LIKE.test(v)) { if (!cands.includes(v)) cands.push(v); continue; }
     const m = raw.match(ORDER_IN_CODE);
     if (m && !orderRef) orderRef = normOrder(m[0]);

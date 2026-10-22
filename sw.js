@@ -1,7 +1,7 @@
 // Service worker: keeps the app working with no network (the upload queue lives in IndexedDB), and holds the
 // order-number reader (Tesseract.js, about 7 MB) so it is downloaded once.
 // Bump VERSION with every release so phones pick up the new files.
-const VERSION = 'pp-live-20261021-1809';
+const VERSION = 'pp-live-20261022-1523';
 const VENDOR = 'pp-vendor';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',

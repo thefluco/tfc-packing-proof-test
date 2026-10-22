@@ -1,7 +1,7 @@
 // TFC Packing Proof - settings that are safe to publish.
 // The station key is NOT here and must never be: it is typed once on the phone (supervisor Settings).
 
-export const APP_VERSION = '2.1.0';
+export const APP_VERSION = '2.2.0';
 
 // The Apps Script web-app URL (.../exec). Not a secret: the script refuses anything without the station key.
 // Fill it in before uploading to GitHub Pages, or paste it in Settings on the phone (Settings wins).
@@ -45,7 +45,7 @@ export const OCR = {
   // slip it cannot read never holds the line for long (21 Oct: 7-24 s a photo on the station phone).
   budgetMs: 8000,
 };
-// The slip's own order barcode (Code 39, from 21 Oct 2026) is logic.js SLIP_FORMAT.
+// The slip's own order barcode (Code 128 from 22 Oct 2026, Code 39 before): logic.js SLIP_FORMATS / isSlipCode.
 
 // Barcode reading: Chrome's built-in BarcodeDetector, else this MIT library (ZXing in WebAssembly), loaded once.
 export const BARCODE_FALLBACK_URL = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/es/ponyfill.min.js';
